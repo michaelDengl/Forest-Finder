@@ -39,24 +39,19 @@ def set_motor(speed_percent: int):
 try:
 
     duty = 100
-    print(f"Reverse at {duty}%")
+    print(f"Drop a card...")
     set_motor(-duty)
-    time.sleep(0.5)
-    print("Stop")
+    time.sleep(0.6)
     set_motor(0)
-    time.sleep(1)
+    time.sleep(0.0)
 
-    print(f"Forward at {duty}%")
     set_motor(duty)
-    time.sleep(1)
-    print("Stop")
+    time.sleep(1.1)
     set_motor(0)
-    time.sleep(1)
+    time.sleep(0.0)
 
-    print(f"Reverse at {duty}%")
     set_motor(-duty)
-    time.sleep(0.5)
-    print("Stop")
+    time.sleep(0.6)
     set_motor(0)
 
 finally:

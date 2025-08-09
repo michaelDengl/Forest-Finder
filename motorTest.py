@@ -41,21 +41,21 @@ try:
     duty = 100
     print(f"Reverse at {duty}%")
     set_motor(-duty)
-    time.sleep(0.5)
+    time.sleep(0.6)
     print("Stop")
     set_motor(0)
-    time.sleep(1)
+    time.sleep(0.0)
 
     print(f"Forward at {duty}%")
     set_motor(duty)
-    time.sleep(1)
+    time.sleep(1.1)
     print("Stop")
     set_motor(0)
-    time.sleep(1)
+    time.sleep(0.0)
 
     print(f"Reverse at {duty}%")
     set_motor(-duty)
-    time.sleep(0.5)
+    time.sleep(0.6)
     print("Stop")
     set_motor(0)
 

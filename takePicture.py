@@ -36,7 +36,7 @@ def close_camera():
 
 atexit.register(close_camera)
 
-def capture_mtg_photo(output_folder="/home/lubuharg/Documents/MyScanner/MTG/Input"):
+def capture_mtg_photo(output_folder="/home/lubuharg/Documents/MTG/Input"):
     # Ensure output directory exists
     os.makedirs(output_folder, exist_ok=True)
 

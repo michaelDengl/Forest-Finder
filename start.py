@@ -5,7 +5,7 @@ from datetime import datetime
 from mtg_ocr_engine import set_csv_path, OUTPUT_FOLDER
 
 # === Pre-Cleaning all directories
-subprocess.run(["python3", "cleanup.py"])
+subprocess.run(["python3", "cleanup.py"]) 
 
 # === Creating CSV File
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)

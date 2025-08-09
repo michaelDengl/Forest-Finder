@@ -50,7 +50,7 @@ def preprocess_title_region_working(image_bgr, debug_path=None):
     # --- 1) Rotate (keep size) ---
     (h, w) = image_bgr.shape[:2]
     center = (w // 2, h // 2)
-    M = cv2.getRotationMatrix2D(center, 90, 1.0)
+    M = cv2.getRotationMatrix2D(center, 91, 1.0)
     image_bgr = cv2.warpAffine(image_bgr, M, (w, h),
                                flags=cv2.INTER_LINEAR,
                                borderMode=cv2.BORDER_REPLICATE)
@@ -94,10 +94,10 @@ def preprocess_title_region_working(image_bgr, debug_path=None):
 
     # --- 7) Fine crop (same ratios) ---
     H3, W3 = work.shape[:2]
-    cut_left   = int(W3 * 0.45)
-    cut_top    = int(H3 * 0.7)
+    cut_left   = int(W3 * 0.42)
+    cut_top    = int(H3 * 0.68)
     cut_right  = int(W3 * 0.0)
-    cut_bottom = int(H3 * 0.2)
+    cut_bottom = int(H3 * 0.19)
     work = work[cut_top:H3 - cut_bottom, cut_left:W3 - cut_right]
     t_fine = time.perf_counter()
 
