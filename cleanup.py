@@ -1,0 +1,21 @@
+import os
+import glob
+
+# Paths to clean
+INPUT_FOLDER = "/home/lubuharg/Documents/MyScanner/MTG/Input"
+OUTPUT_FOLDER = "/home/lubuharg/Documents/MyScanner/MTG/Output"
+
+def clean_folder(folder_path, extensions):
+    for ext in extensions:
+        for file in glob.glob(os.path.join(folder_path, f"*.{ext}")):
+            try:
+                os.remove(file)
+                print(f"[CLEANED] {file}")
+            except Exception as e:
+                print(f"[ERROR] Could not delete {file}: {e}")
+
+if __name__ == "__main__":
+    print("[*] Cleaning up folders...")
+    clean_folder(INPUT_FOLDER, ["jpg", "jpeg"])
+    clean_folder(OUTPUT_FOLDER, ["png","csv"])
+    print("[✓] Cleanup complete.")
