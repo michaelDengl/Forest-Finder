@@ -1,140 +1,162 @@
 # Magic: The Gathering Card OCR & Price Scanner
 
-This project scans Magic: The Gathering (MTG) cards, detects their names via OCR, and fetches pricing and set information from the [Scryfall API](https://scryfall.com). It is designed to work together with a **LEGO robot feeder** that automatically presents cards to a Raspberry Pi camera.
+This project scans Magic: The Gathering (MTG) cards, detects their names via OCR, and (optionally) fetches set/pricing via the Scryfall API. It runs on a Raspberry Pi with a camera, a DC motor card feeder (L298N driver), and a servo ejector.
 
 ---
 
 ## 🛠 System Overview
 
-The setup consists of **three steps**:
+The pipeline is coordinated by **`start.py`** and consists of four steps:
 
-1. **Card Feeder: `bringToPos.py`**
+1. **Feed card – `cardFeeder.py`**
+   Moves one card into place using an L298N H-bridge and a small DC gear motor.
 
-   * Placeholder (to be implemented when the motor arrives).
-   * Intended to move a card into the correct camera position.
+2. **Capture image – `takePicture.py`**
+   Takes a high‑res photo with PiCamera2 (continuous AF) and saves it to `Input/`.
 
-2. **Image Capture: `takePicture.py`**
+3. **OCR & match – `mtg_ocr_engine.py`**
+   Preprocesses the title strip, runs Tesseract, and fuzzy-matches to Scryfall.
+   Creates **one CSV per run** in `Output/` and appends each recognized card name.
 
-   * Uses the Raspberry Pi Camera Module (with autofocus).
-   * Captures a photo and stores it in `MTG/Input/`.
+4. **Eject card – `dropCard.py`**
+   Drives the servo to drop the scanned card.
 
-3. **OCR & Price Lookup: `mtg_ocr_scanner.py`**
-
-   * Detects the card name using OCR.
-   * Queries the Scryfall API for card details and pricing.
-   * Logs results to CSV in `MTG/Output/`.
-
-4. **Card Ejection: `dropCard.py`**
-
-   * Uses a servo to drop the scanned card out of the machine.
-
-Everything is coordinated using `start.py`.
+Optionally, `start.py` can loop until a target card (e.g., **"Forest"**) is found.
 
 ---
 
 ## 📂 Project Structure
 
 ```
-MyScanner/
+MTG/
+├── Input/                      # Captured photos from the camera (per run)
+├── Output/                     # One CSV per run with detected card names ("card" column), prices, etc.
+├── debug_prepped/              # (Debug) preprocessed title/cropped images saved by the debug scanner
+├── Documents/                  # Diagrams/photos for the README (e.g., Breadboard.jpg)
 │
-├── MTG/
-│   ├── Input/                  # Captured images go here
-│   ├── Output/                 # CSV results go here
-│   ├── debug_prepped/          # Preprocessed images for debugging
-│   ├── bringToPos.py           # Placeholder to move card into position
-│   ├── takePicture.py          # Autofocus + image capture logic
-│   ├── dropCard.py             # Rotates servo to drop scanned card
-│   ├── mtg_ocr_scanner.py      # Main OCR + price fetcher
-│   ├── start.py                # Main runner script to execute the whole flow
-│   └── README.md               # This file
+├── start.py                    # Orchestrates full flow: feed card → photo → OCR → Scryfall → CSV → drop card
+├── mtg_ocr_engine.py           # Preprocess + OCR + Scryfall lookup + CSV append
+├── mtg_ocr_scanner_debug.py    # Debug variant with timing + saves debug images into debug_prepped/
+│
+├── cardFeeder.py               # Controls DC gear motor via L298N to feed a single card
+├── dropCard.py                 # Servo ejector to drop the scanned card
+├── takePicture.py              # Camera capture using Picamera2 (reusable instance)
+│
+├── motorTest.py                # Quick DC motor test (direction/speed) for the feeder
+├── servoTest.py                # Basic servo test
+├── servoSlowTest.py            # Slow-movement servo test to fine-tune angles/speed
+├── cameraTests.py              # Quick camera snapshots/focus/exposure tests
+│
+├── mtg_ocr_engine.py           # (listed above; kept here for completeness)
+├── cleanup.py                  # Utility to clean temp/debug files or reset folders between runs
+├── send_csv_email.py           # Helper to email the latest CSV (optional utility)
+│
+├── all_cards.txt               # Card name dictionary/reference list used by OCR or validation
+├── test.jpg                    # Sample image (consider moving to Input/ or Documents/)
+├── README.md                   # Project readme (currently readme.md; see note below)
+
 ```
 
 ---
 
-## 🚀 How It Works
+## 🔌 Hardware & Wiring
 
-1. **Bring Card into Position**
+**Raspberry Pi GPIO header (reference):**
+![GPIO Pins](Documents/GPIO%20Pins.jpg)
 
-   * Placeholder code in `bringToPos.py` simulates the feeder movement.
+**Breadboard reference:**
+![Breadboard](Documents/Breadboard.jpg)
 
-2. **Capture Image**
+**L298N Motor Driver (we use the left channel OUT1/OUT2):**
+![L298N Motor Driver Board](Documents/L298N%20Driver%20board.jpg)
 
-   * `takePicture.py` uses PiCamera2 with autofocus to take a sharp photo.
-   * Images are saved as `mtg_photo_YYYY.MM.DD_HH-MM-SS.jpg`.
+**Our wiring (BCM numbering):**
 
-3. **Run OCR and Match to Scryfall**
+```
+ENA  → GPIO13  (PWM speed control)   ← remove the ENA jumper to use PWM
+IN1  → GPIO5   (direction A)
+IN2  → GPIO6   (direction B)
+GND  → Pi GND  (common ground)
+5V   → Pi 5V   (logic + light motor; keep loads small)
+OUT1/OUT2 → DC motor terminals (polarity sets direction)
+```
 
-   * `mtg_ocr_scanner.py` reads from `Input/`.
-   * Preprocesses the top 10% of the image for the card title.
-   * Runs Tesseract OCR with language filtering.
-   * Uses fuzzy matching and fallbacks to identify the card via the Scryfall API.
+> If your motor draws more current, use an external motor supply on **VCC** and share **GND** with the Pi. The 5V pin on many L298N boards is for logic; do not backfeed the Pi from the driver.
 
-4. **Log Results**
-
-   * Saves results to CSV in the `Output/` folder.
-   * Each entry contains filename, OCR text, matched name, set, and USD price.
-
-5. **Eject Card**
-
-   * `dropCard.py` rotates a servo motor from 90° to 180° (same as test script) to drop the card.
+**Servo ejector:** uses PWM on GPIO18 (as in `dropCard.py`).
 
 ---
 
-## 🖥 Requirements
+## 🧠 OCR Preprocessing (summary)
 
-### Hardware:
+`mtg_ocr_engine.preprocess_title_region_working()` performs:
 
-* Raspberry Pi (any modern model)
-* Pi Camera Module with autofocus (e.g., IMX708)
-* Servo motor (PWM-capable)
-* LEGO or custom feeder mechanism
-* MTG cards 😉
+* Rotate image **90°** (keeps original resolution)
+* Crop top **50%** (title band)
+* Grayscale → optional **1.5×** upscale
+* Shave margins (5% each side)
+* Fine crop (focus box over the title area)
+* **Otsu** binarization → feed to Tesseract
 
-### Software:
+For profiling & visual debugging, use `mtg_ocr_scanner_debug.py` (saves to `debug_prepped/` and prints per‑step timings).
 
-* Python 3
-* Tesseract OCR
-* Install dependencies:
+---
+
+## ▶ Usage
+
+### Run the full workflow
+
+```bash
+cd ~/Documents/MTG
+python3 start.py
+```
+
+This will feed a card → capture → OCR/match → append to the run CSV → eject.
+`start.py` can optionally loop until a target card name is detected.
+
+### Just test the feeder motor
+
+```bash
+python3 motorTest.py
+```
+
+### Just feed one card
+
+```bash
+python3 motorTest.py
+```
+
+### Debug OCR on all images in `Input/`
+
+```bash
+python3 mtg_ocr_scanner_debug.py
+```
+
+---
+
+## 📦 Dependencies
+
+Install Tesseract and Python libs:
 
 ```bash
 sudo apt install tesseract-ocr
 pip install opencv-python pillow pytesseract requests rapidfuzz numpy
 ```
 
----
-
-## ▶ Usage
-
-1. **Run the Complete Workflow**
-
-```bash
-cd MyScanner/MTG
-python3 start.py
-```
-
-This script:
-
-* Brings the card into position (placeholder)
-* Takes a picture with autofocus
-* Runs OCR and fetches price info
-* Logs results to CSV
-* Drops the card out of the machine
-
-2. **View Output**
-
-* Debug preprocessing images: `MTG/debug_prepped/`
-* Final CSV report: `MTG/Output/magic_report_YYYY.MM.DD_HH:MM.csv`
+PiCamera2 comes via Raspberry Pi OS packages.
 
 ---
 
 ## 📌 Notes & Tips
 
-* You can adjust the crop percentages in `preprocess_title_region_working()` for better OCR.
-* Supports fallback card matching in multiple languages.
-* Designed for automation; ideal for batch scanning.
+* Ensure **common ground** between Pi and L298N.
+* Remove the **ENA** jumper on L298N if you drive speed via PWM (GPIO13).
+* Keep the motor load modest when powering from Pi 5V (USB supply limits!).
+* You can tweak crop ratios in `preprocess_title_region_working()` to match your framing.
+* The CSV contains a single header `card` and one line per recognized card during the current run.
 
 ---
 
 ## 📜 License
 
-MIT License — feel free to use and modify for personal or commercial projects.
+MIT — free for personal or commercial use.
