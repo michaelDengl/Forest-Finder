@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+*.pyo
+*.swp
+*.swo
+
+# Runtime I/O
+Input/
+debug_prepped/
+Output/*.csv
+
+# Camera outputs
+*.jpg
+*.jpeg
+*.png
+
+# Bytecode caches anywhere
+**/__pycache__/
