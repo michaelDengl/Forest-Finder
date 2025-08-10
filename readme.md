@@ -114,7 +114,49 @@ MTG/
 
 ---
 
-## Dependencies
+## 🔌 Hardware & Wiring
+
+**Raspberry Pi GPIO header (reference):**  
+![GPIO Pins](Documents/GPIO%20Pins.jpg)
+
+**Breadboard reference:**  
+![Breadboard](Documents/Breadboard.jpg)
+
+**L298N Motor Driver (we use the left channel OUT1/OUT2):**  
+![L298N Motor Driver Board](Documents/L298N%20Driver%20board.jpg)
+
+**Our wiring (BCM numbering):**
+```
+ENA  → GPIO13  (PWM speed control)   ← remove the ENA jumper to use PWM
+IN1  → GPIO5   (direction A)
+IN2  → GPIO6   (direction B)
+GND  → Pi GND  (common ground)
+5V   → Pi 5V   (logic + light motor; keep loads small)
+OUT1/OUT2 → DC motor terminals (polarity sets direction)
+```
+
+> If your motor draws more current, use an external motor supply on **VCC** and share **GND** with the Pi. The 5V pin on many L298N boards is for logic; do not backfeed the Pi from the driver.
+
+**Servo ejector:** uses PWM on GPIO18 (as in `dropCard.py`).
+
+---
+
+## 🧠 OCR Preprocessing (summary)
+
+`mtg_ocr_engine.preprocess_title_region_working()` performs:
+
+* Rotate image **90°** (keeps original resolution)
+* Crop top **50%** (title band)
+* Grayscale → optional **1.5×** upscale
+* Shave margins (5% each side)
+* Fine crop (focus box over the title area)
+* **Otsu** binarization → feed to Tesseract
+
+When a card is `<NOT FOUND>`, the preprocessed image is saved to `debug_prepped/` and optionally sent via email.
+
+---
+
+## 📦 Dependencies
 
 **System packages:**
 ```bash
@@ -169,6 +211,16 @@ When a card cannot be identified:
 
 ---
 
-## License
+## 📌 Notes & Tips
 
-MIT License
+* Ensure **common ground** between Pi and L298N.
+* Remove the **ENA** jumper on L298N if you drive speed via PWM (GPIO13).
+* Keep the motor load modest when powering from Pi 5V (USB supply limits!).
+* You can tweak crop ratios in `preprocess_title_region_working()` to match your framing.
+* The CSV now has `card` and `reason` columns for easier troubleshooting.
+
+---
+
+## 📜 License
+
+MIT — free for personal or commercial use.
