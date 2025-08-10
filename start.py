@@ -18,7 +18,7 @@ while found != "Forest":
     print("[STEP 1] Moving card into position...")
     import subprocess
     subprocess.run(["python3", "cardFeeder.py"])
-    time.sleep(1)
+    time.sleep(0)
 
     # === STEP 2: Capture image ===
     print("[STEP 2] Capturing photo...")

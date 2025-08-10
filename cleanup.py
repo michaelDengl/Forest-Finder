@@ -2,8 +2,8 @@ import os
 import glob
 
 # Paths to clean
-INPUT_FOLDER = "/home/lubuharg/Documents/MyScanner/MTG/Input"
-OUTPUT_FOLDER = "/home/lubuharg/Documents/MyScanner/MTG/Output"
+INPUT_FOLDER = "/home/lubuharg/Documents/MTG/Input"
+OUTPUT_FOLDER = "/home/lubuharg/Documents/MTG/Output"
 
 def clean_folder(folder_path, extensions):
     for ext in extensions:

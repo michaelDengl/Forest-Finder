@@ -15,10 +15,11 @@ from datetime import datetime
 # === CONFIGURATION ===
 OUTPUT_FOLDER = "/home/lubuharg/Documents/MyScanner/MTG/Output"
 OCR_CONFIG = (
-    "--oem 1 "
-    "--psm 7 "
-    "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz\u0020 "
-    "-c tessedit_char_blacklist=0123456789"
+    '--oem 1 '
+    '--psm 7 '
+    '-c "tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz " '
+    '-c tessedit_char_blacklist=0123456789 '
+    '-c preserve_interword_spaces=1'
 )
 
 SCRYFALL_NAMED = "https://api.scryfall.com/cards/named"
@@ -63,10 +64,10 @@ def preprocess_title_region_working(image_bgr):
 
     # 6) Fine crop
     H3, W3 = work.shape[:2]
-    cut_left   = int(W3 * 0.45)
-    cut_top    = int(H3 * 0.7)
+    cut_left   = int(W3 * 0.43)
+    cut_top    = int(H3 * 0.68)
     cut_right  = int(W3 * 0.0)
-    cut_bottom = int(H3 * 0.2)
+    cut_bottom = int(H3 * 0.19)
     work = work[cut_top:H3 - cut_bottom, cut_left:W3 - cut_right]
 
     # 7) Binarize (Otsu)
@@ -162,6 +163,8 @@ def set_csv_path(path):
     CSV_FILE_PATH = path
 
 def main(image_path):
+    import csv
+
     print(f"[OCR] Processing image: {image_path}")
 
     try:
@@ -187,14 +190,16 @@ def main(image_path):
         f"magic_report_{datetime.now().strftime('%Y.%m.%d_%H-%M-%S')}.csv"
     )
 
-    # Append instead of overwrite
+    # Append instead of overwrite, with proper quoting
     file_exists = os.path.exists(csv_path)
-    with open(csv_path, "a", encoding="utf-8") as f:
+    with open(csv_path, "a", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f, delimiter=";", quoting=csv.QUOTE_MINIMAL)
         if not file_exists:
-            f.write("card\n")  # only write header if new file
-        f.write(f"{matched}\n")
+            writer.writerow(["card"])
+        writer.writerow([matched])
 
     print(f"[✓] Result written to {csv_path}")
     return matched
+
 
 

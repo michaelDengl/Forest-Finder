@@ -17,7 +17,7 @@ def set_angle(angle):
 try:
     print("Resetting to 0°")
     set_angle(90)
-    time.sleep(2)
+    time.sleep(1)
 
     print("Slowly moving to 180°")
     for angle in range(0, 181, 5):  # Step 1 degree at a time

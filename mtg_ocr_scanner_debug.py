@@ -26,10 +26,11 @@ OUTPUT_FILE = os.path.join(
 )
 # Tesseract config: OEM 1 (LSTM), PSM 8 (single word), whitelist letters and apostrophes, blacklist digits
 OCR_CONFIG = (
-    "--oem 1 "
-    "--psm 7 "
-    "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz\u0020 "
-    "-c tessedit_char_blacklist=0123456789"
+    '--oem 1 '
+    '--psm 7 '
+    '-c "tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz " '
+    '-c tessedit_char_blacklist=0123456789 '
+    '-c preserve_interword_spaces=1'
 )
 
 SCRYFALL_NAMED = "https://api.scryfall.com/cards/named"
@@ -94,7 +95,7 @@ def preprocess_title_region_working(image_bgr, debug_path=None):
 
     # --- 7) Fine crop (same ratios) ---
     H3, W3 = work.shape[:2]
-    cut_left   = int(W3 * 0.42)
+    cut_left   = int(W3 * 0.43)
     cut_top    = int(H3 * 0.68)
     cut_right  = int(W3 * 0.0)
     cut_bottom = int(H3 * 0.19)

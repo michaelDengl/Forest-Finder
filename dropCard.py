@@ -20,7 +20,7 @@ def drop_card():
 
     try:
         set_angle(90)
-        time.sleep(2)
+        time.sleep(1)
 
         for angle in range(0, 181, 5):
             set_angle(angle)
