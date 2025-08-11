@@ -71,9 +71,9 @@ def preprocess_title_region_working(image_bgr, save_debug_path=None):
     # 6) Fine crop (tune as needed)
     H3, W3 = work.shape[:2]
     cut_left   = int(W3 * 0.43)
-    cut_top    = int(H3 * 0.68)
+    cut_top    = int(H3 * 0.66)
     cut_right  = int(W3 * 0.0)
-    cut_bottom = int(H3 * 0.19)
+    cut_bottom = int(H3 * 0.21)
     work = work[cut_top:H3 - cut_bottom, cut_left:W3 - cut_right]
 
     # 7) Binarize (Otsu)
