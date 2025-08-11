@@ -6,14 +6,19 @@ import time
 import requests
 import cv2
 import pytesseract
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image
 from rapidfuzz import fuzz, process
 from rapidfuzz.distance import Levenshtein
 import re
 from datetime import datetime
 
+# === PORTABLE PATHS (repo-root relative) ===
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_FOLDER = os.path.join(BASE_DIR, "Output")
+DEBUG_FOLDER = os.path.join(BASE_DIR, "debug_prepped")
+
 # === CONFIGURATION ===
-OUTPUT_FOLDER = "/home/lubuharg/Documents/MyScanner/MTG/Output"
+# Preserve spaces + properly quoted whitelist so Tesseract keeps blanks.
 OCR_CONFIG = (
     '--oem 1 '
     '--psm 7 '
@@ -24,15 +29,16 @@ OCR_CONFIG = (
 
 SCRYFALL_NAMED = "https://api.scryfall.com/cards/named"
 SCRYFALL_SEARCH = "https://api.scryfall.com/cards/search"
-FALLBACK_LANGUAGES = ["de"]#, "fr", "es", "it", "pt", "ja", "ko", "ru"]
+FALLBACK_LANGUAGES = ["de"]  # add more if needed
 CSV_FILE_PATH = None
 
-def preprocess_title_region_working(image_bgr):
+
+def preprocess_title_region_working(image_bgr, save_debug_path=None):
     import numpy as np
     import cv2
     from PIL import Image
 
-    # 1) Rotate
+    # 1) Rotate 90°
     (h, w) = image_bgr.shape[:2]
     center = (w // 2, h // 2)
     M = cv2.getRotationMatrix2D(center, 90, 1.0)
@@ -62,7 +68,7 @@ def preprocess_title_region_working(image_bgr):
     margin_h = int(H2 * 0.05)
     work = gray[margin_h:H2 - margin_h, margin_w:W2 - margin_w]
 
-    # 6) Fine crop
+    # 6) Fine crop (tune as needed)
     H3, W3 = work.shape[:2]
     cut_left   = int(W3 * 0.43)
     cut_top    = int(H3 * 0.68)
@@ -73,14 +79,21 @@ def preprocess_title_region_working(image_bgr):
     # 7) Binarize (Otsu)
     _, bw = cv2.threshold(work, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # Return PIL image for OCR
-    return Image.fromarray(bw)
+    pil_img = Image.fromarray(bw)
+
+    # Save if requested
+    if save_debug_path:
+        os.makedirs(os.path.dirname(save_debug_path), exist_ok=True)
+        pil_img.save(save_debug_path)
+
+    return pil_img
 
 
 def clean_ocr_text(raw):
     if not raw:
         return ""
     return re.sub(r"[^A-Za-z\s]", "", raw).lower().strip()
+
 
 def normalize_ocr_text(raw):
     if not raw:
@@ -89,15 +102,28 @@ def normalize_ocr_text(raw):
     s = re.sub(r"[^A-Za-z\s]", "", s)
     return s.lower().strip()
 
+
 def ocr_card_name(image_path):
+    """
+    Returns (first_line_text_or_None, debug_img_path)
+    and writes the preprocessed OCR strip to debug_prepped/.
+    """
     img_bgr = cv2.imread(image_path)
     if img_bgr is None:
         raise ValueError(f"Failed to load image: {image_path}")
 
-    prepped = preprocess_title_region_working(img_bgr)
+    base = os.path.splitext(os.path.basename(image_path))[0]
+    debug_img_path = os.path.join(DEBUG_FOLDER, f"ocr_debug_{base}.png")
+
+    prepped = preprocess_title_region_working(img_bgr, save_debug_path=debug_img_path)
     raw_text = pytesseract.image_to_string(prepped, config=OCR_CONFIG)
+
+    # Debug (optional)
+    # print("[DEBUG] raw_text repr:", repr(raw_text))
+
     lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-    return lines[0] if lines else None
+    return (lines[0] if lines else None), debug_img_path
+
 
 def fuzzy_select_from_list(ocr_text, candidates):
     names = [c["name"] for c in candidates]
@@ -120,6 +146,7 @@ def fuzzy_select_from_list(ocr_text, candidates):
     if best_idx is not None and best_dist <= min(3, max(1, int(len(ocr_text) * 0.25))):
         return candidates[best_idx]
     return None
+
 
 def query_scryfall_best_match(ocr_text):
     lookup = normalize_ocr_text(ocr_text)
@@ -162,24 +189,36 @@ def set_csv_path(path):
     global CSV_FILE_PATH
     CSV_FILE_PATH = path
 
+
 def main(image_path):
     import csv
 
     print(f"[OCR] Processing image: {image_path}")
 
+    matched = "<ERROR>"
+    reason = ""
+    debug_img_path = None
+
     try:
-        raw_ocr = ocr_card_name(image_path)
+        raw_ocr, debug_img_path = ocr_card_name(image_path)  # now returns both raw text + debug image path
         if not raw_ocr:
-            print("[-] No text found in image.")
             matched = "<NOT FOUND>"
+            reason = "No text on card found"
+            print("[-] No text found in image.")
         else:
             cleaned = clean_ocr_text(raw_ocr)
             print(f"[+] OCR raw: '{raw_ocr}' → cleaned: '{cleaned}'")
             card_info = query_scryfall_best_match(cleaned)
-            matched = card_info.get("name", "<NOT FOUND>") if card_info else "<NOT FOUND>"
+            if card_info:
+                matched = card_info.get("name", "<NOT FOUND>")
+                reason = ""  # found OK
+            else:
+                matched = "<NOT FOUND>"
+                reason = f"OCR='{cleaned}' not found"
     except Exception as e:
-        print(f"[ERROR] OCR failed: {e}")
         matched = "<ERROR>"
+        reason = f"OCR error: {e}"
+        print(f"[ERROR] OCR failed: {e}")
 
     # Create output folder if needed
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -190,16 +229,18 @@ def main(image_path):
         f"magic_report_{datetime.now().strftime('%Y.%m.%d_%H-%M-%S')}.csv"
     )
 
-    # Append instead of overwrite, with proper quoting
+    # Append instead of overwrite, with proper quoting for Excel (DE/CH-friendly ;)
     file_exists = os.path.exists(csv_path)
     with open(csv_path, "a", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f, delimiter=";", quoting=csv.QUOTE_MINIMAL)
         if not file_exists:
-            writer.writerow(["card"])
-        writer.writerow([matched])
+            writer.writerow(["card", "reason"])
+        writer.writerow([matched, reason])
 
     print(f"[✓] Result written to {csv_path}")
-    return matched
 
-
-
+    # Return debug image path only if NOT FOUND, otherwise None
+    if matched == "<NOT FOUND>":
+        return matched, reason, csv_path, debug_img_path
+    else:
+        return matched, reason, csv_path, None
