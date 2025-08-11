@@ -29,7 +29,7 @@ apt-get install -y \
   python3-picamera2 libcamera-apps \
   python3-rpi.gpio python3-gpiozero \
   libatlas-base-dev \
-  libjpeg62-turbo libopenjp2-7 libtiff5 zlib1g
+  libjpeg62-turbo libopenjp2-7 libtiff6 zlib1g
 
 # NetworkManager is default on Bookworm; no action needed for Wi-Fi here.
 
@@ -101,3 +101,4 @@ log "Done!"
 echo "Project dir: $PROJECT_DIR"
 echo "Activate venv with: source \"$VENV_DIR/bin/activate\""
 echo "Run: python start.py   (from $PROJECT_DIR)"
+
