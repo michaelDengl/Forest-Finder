@@ -2,6 +2,8 @@
 
 This project scans Magic: The Gathering (MTG) cards, detects their names via OCR, and (optionally) fetches set/pricing via the Scryfall API. It runs on a Raspberry Pi with a camera, a DC motor card feeder (L298N driver), and a servo ejector.
 
+<img src="Documents/Picture.jpg" alt="Forest-Finder" width="50%">
+
 ---
 
 # Detailed System Overview
