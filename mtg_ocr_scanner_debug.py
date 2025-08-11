@@ -40,94 +40,117 @@ FALLBACK_LANGUAGES = ["de", "fr", "es", "it", "pt", "ja", "ko", "ru"]
 
 # === PREPROCESSING / OCR ===
 
-def preprocess_title_region_working(image_bgr, debug_path=None):
-    import time
-    import numpy as np
+def preprocess_title_region_working(image_bgr, save_debug_path=None):
+    import os
     import cv2
+    import numpy as np
     from PIL import Image
 
-    t0 = time.perf_counter()
+    h, w = image_bgr.shape[:2]
 
-    # --- 1) Rotate (keep size) ---
-    (h, w) = image_bgr.shape[:2]
-    center = (w // 2, h // 2)
-    M = cv2.getRotationMatrix2D(center, 91, 1.0)
+    # Rotate 90° clockwise
+    M = cv2.getRotationMatrix2D((w // 2, h // 2), 90, 1.0)
     image_bgr = cv2.warpAffine(image_bgr, M, (w, h),
-                               flags=cv2.INTER_LINEAR,
-                               borderMode=cv2.BORDER_REPLICATE)
-    t_rot = time.perf_counter()
+                               flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
 
-    # --- 2) Early crop top region (OpenCV, no PIL) ---
-    top_h = int(h * 0.50)  # same 50% band you used
-    title_bgr = image_bgr[0:top_h, 0:w]
-    t_crop = time.perf_counter()
+    # Aggressive crop
+    top_h   = int(h * 0.60)   # keep only top 60% of height
+    cut_top = int(h * 0.15)   # remove 15% from very top
+    cut_left = int(w * 0.35)  # remove 35% from left
+    title_bgr = image_bgr[cut_top:top_h, cut_left:w]
 
-    # --- 3) Grayscale ---
+    # Grayscale
     gray = cv2.cvtColor(title_bgr, cv2.COLOR_BGR2GRAY)
-    t_gray = time.perf_counter()
 
-    # --- 4) Optional light upscale (try 1.5x; set to None or 1.0 to disable) ---
-    UPSCALE = 1.5  # try 1.0 to disable
-    if UPSCALE and UPSCALE != 1.0:
-        new_w = int(gray.shape[1] * UPSCALE)
-        new_h = int(gray.shape[0] * UPSCALE)
-        gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-    t_resize = time.perf_counter()
+    # Upscale for OCR
+    UPSCALE = 1.5
+    if UPSCALE != 1.0:
+        gray = cv2.resize(gray, (int(gray.shape[1] * UPSCALE),
+                                 int(gray.shape[0] * UPSCALE)), interpolation=cv2.INTER_LINEAR)
 
-    # --- 5) Fast denoise/sharpen (try NONE first; enable if needed) ---
-    USE_MEDIAN = False   # True → cv2.medianBlur(gray, 3)
-    USE_UNSHARP = False  # True → mild unsharp mask
-
-    work = gray
-    if USE_MEDIAN:
-        work = cv2.medianBlur(work, 3)
-    if USE_UNSHARP:
-        blur = cv2.GaussianBlur(work, (0, 0), 1.0)
-        work = cv2.addWeighted(work, 1.5, blur, -0.5, 0)
-    t_filters = time.perf_counter()
-
-    # --- 6) Shave margins (same ratios) ---
-    H2, W2 = work.shape[:2]
+    # Trim margins
+    H2, W2 = gray.shape[:2]
     margin_w = int(W2 * 0.05)
     margin_h = int(H2 * 0.05)
-    work = work[margin_h:H2 - margin_h, margin_w:W2 - margin_w]
-    t_margins = time.perf_counter()
+    work = gray[margin_h:H2 - margin_h, margin_w:W2 - margin_w]
 
-    # --- 7) Fine crop (same ratios) ---
-    H3, W3 = work.shape[:2]
-    cut_left   = int(W3 * 0.43)
-    cut_top    = int(H3 * 0.66)
-    cut_right  = int(W3 * 0.0)
-    cut_bottom = int(H3 * 0.21)
-    work = work[cut_top:H3 - cut_bottom, cut_left:W3 - cut_right]
-    t_fine = time.perf_counter()
+    # Find title band
+    band = _find_title_band_y_range(work)
 
-    # --- 8) Binarize (Otsu); try skipping GaussianBlur first ---
-    # If needed: work = cv2.GaussianBlur(work, (3, 3), 0)
-    _, bw = cv2.threshold(work, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    t_bin = time.perf_counter()
+    dbg = cv2.cvtColor(work, cv2.COLOR_GRAY2BGR)
+    if band is not None:
+        y1, y2 = band
+        cv2.rectangle(dbg, (0, y1), (dbg.shape[1] - 1, y2), (0, 255, 0), 2)
+        band_img = work[y1:y2, :]
+    else:
+        # Fallback crop
+        H3, W3 = work.shape[:2]
+        cut_left   = int(W3 * 0.43)
+        cut_top    = int(H3 * 0.68)
+        cut_bottom = int(H3 * 0.19)
+        band_img = work[cut_top:H3 - cut_bottom, cut_left:W3]
+        cv2.rectangle(dbg, (cut_left, cut_top), (W3 - 1, H3 - cut_bottom - 1), (0, 0, 255), 2)
 
-    # --- 9) Optional debug save ---
-    if debug_path:
-        os.makedirs(os.path.dirname(debug_path), exist_ok=True)
-        Image.fromarray(bw).save(debug_path, format="PNG")
-        print(f"[DEBUG] OCR input (binarized) written to: {debug_path}")
+    # Always save debug overlay
+    base_name = "band_debug"
+    if save_debug_path:
+        base = os.path.splitext(os.path.basename(save_debug_path))[0].replace("_prepped", "")
+        base_name = f"{base}_band_debug"
+    os.makedirs(DEBUG_FOLDER, exist_ok=True)
+    cv2.imwrite(os.path.join(DEBUG_FOLDER, f"{base_name}.png"), dbg)
 
-    t_save = time.perf_counter()
+    # Binarize
+    _, bw = cv2.threshold(band_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    def ms(a, b): return int((b - a) * 1000)
-    print(
-        "[TIMING-FAST] rotate={}ms | crop={}ms | gray={}ms | resize={}ms | "
-        "filters={}ms | margins={}ms | finecrop={}ms | binarize={}ms | save={}ms | total={}ms".format(
-            ms(t0, t_rot), ms(t_rot, t_crop), ms(t_crop, t_gray),
-            ms(t_gray, t_resize), ms(t_resize, t_filters),
-            ms(t_filters, t_margins), ms(t_margins, t_fine),
-            ms(t_fine, t_bin), ms(t_bin, t_save), ms(t0, t_save)
-        )
-    )
+    pil_img = Image.fromarray(bw)
+    if save_debug_path:
+        os.makedirs(os.path.dirname(save_debug_path), exist_ok=True)
+        pil_img.save(save_debug_path)
+    return pil_img
 
-    # Return PIL image as your OCR expects
-    return Image.fromarray(bw)
+
+def _find_title_band_y_range(gray_up, debug=False):
+    import cv2
+    import numpy as np
+
+    H, W = gray_up.shape[:2]
+    blur = cv2.GaussianBlur(gray_up, (3, 3), 0)
+    bw = cv2.adaptiveThreshold(blur, 255,
+                               cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
+                               35, 10)
+
+    inv = (255 - bw) // 255
+    top_half = inv[: int(H * 0.6), :]
+    proj = top_half.sum(axis=1).astype(np.float32)
+
+    k = max(3, int(0.01 * H)) | 1
+    proj_smooth = cv2.GaussianBlur(proj, (k, 1), 0).ravel()
+
+    y_min = int(0.10 * H)
+    y_max = int(0.45 * H)
+    roi = proj_smooth[y_min:y_max]
+    if roi.size > 0 and float(roi.max()) > 0.0:
+        y_peak = y_min + int(np.argmax(roi))
+        band_h = int(0.30 * H)  # widen detection window
+        y1 = max(0, y_peak - band_h // 2)
+        y2 = min(H, y1 + band_h)
+        return (y1, y2)
+
+    edges = cv2.Canny(blur, 100, 150, L2gradient=True)
+    lines = cv2.HoughLinesP(edges, rho=1, theta=np.pi / 180, threshold=60,
+                            minLineLength=int(W * 0.40), maxLineGap=int(W * 0.05))
+    if lines is not None:
+        ys = [(y1 + y2) // 2 for x1, y1, x2, y2 in lines[:, 0, :]
+              if abs(y2 - y1) <= int(0.02 * H) and min(y1, y2) < int(0.6 * H)]
+        if ys:
+            y_med = int(np.median(ys))
+            band_h = int(0.12 * H)
+            y1 = max(0, y_med - band_h // 2)
+            y2 = min(H, y1 + band_h)
+            return (y1, y2)
+
+    return None
+
 
 
 
@@ -159,7 +182,7 @@ def ocr_card_name(image_path, debug_dir=None):
         print(f"[DEBUG] Will write preprocessed debug image to: {debug_path}")
 
     # Preprocess and save debug image
-    prepped = preprocess_title_region_working(img_bgr, debug_path=debug_path)
+    prepped = preprocess_title_region_working(img_bgr, save_debug_path=debug_path)
 
     # OCR via Tesseract
     raw_text = pytesseract.image_to_string(prepped, config=OCR_CONFIG)
