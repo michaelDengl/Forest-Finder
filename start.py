@@ -16,6 +16,7 @@ run_csv = os.path.join(
 set_csv_path(run_csv)
 
 target_card = "Forest"  # stop condition
+os.environ["CSV_SUPPRESS_NAME"] = target_card
 found = None
 not_found_images = []
 

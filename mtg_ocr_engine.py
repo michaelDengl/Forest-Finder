@@ -330,7 +330,13 @@ def main(image_path):
                 print(f"[WARN] Price lookup failed for '{matched}': {e}")
             reason_out = ""  # no reason if found
 
-        writer.writerow([qty, matched, price, reason_out])
+        suppress = os.environ.get("CSV_SUPPRESS_NAME")
+        skip_row = bool(suppress and matched == suppress)
+
+        if not skip_row:
+            writer.writerow([qty, matched, price, reason_out])
+        else:
+            print(f"[CSV] Skipping row for termination card '{matched}'.")
 
     print(f"[✓] Result written to {csv_path}")
 
