@@ -36,7 +36,7 @@ OCR_CONFIG = (
 SCRYFALL_NAMED = "https://api.scryfall.com/cards/named"
 SCRYFALL_SEARCH = "https://api.scryfall.com/cards/search"
 FUZZY_SCORE_CUTOFF = 60
-FALLBACK_LANGUAGES = ["de", "fr", "es", "it", "pt", "ja", "ko", "ru"]
+FALLBACK_LANGUAGES = ["de"]
 
 # === PREPROCESSING / OCR ===
 
@@ -96,9 +96,9 @@ def preprocess_title_region_working(image_bgr, debug_path=None):
     # --- 7) Fine crop (same ratios) ---
     H3, W3 = work.shape[:2]
     cut_left   = int(W3 * 0.43)
-    cut_top    = int(H3 * 0.66)
+    cut_top    = int(H3 * 0.64)
     cut_right  = int(W3 * 0.0)
-    cut_bottom = int(H3 * 0.21)
+    cut_bottom = int(H3 * 0.22)
     work = work[cut_top:H3 - cut_bottom, cut_left:W3 - cut_right]
     t_fine = time.perf_counter()
 
@@ -172,7 +172,7 @@ def fuzzy_select_from_list(ocr_text, candidates, score_cutoff=FUZZY_SCORE_CUTOFF
     names = [c["name"] for c in candidates]
     if not names:
         return None
-    best = process.extractOne(ocr_text, names, scorer=fuzz.UWRatio, score_cutoff=score_cutoff)
+    best = process.extractOne(ocr_text, names, scorer=fuzz.WRatio, score_cutoff=score_cutoff)
     if not best:
         best = process.extractOne(ocr_text, names, scorer=fuzz.partial_ratio, score_cutoff=score_cutoff)
     if best:

@@ -46,7 +46,7 @@ try:
     time.sleep(0.0)
 
     set_motor(duty)
-    time.sleep(1.1)
+    time.sleep(1.3)
     set_motor(0)
     time.sleep(0.0)
 
