@@ -24,7 +24,7 @@ The pipeline is orchestrated by `start.py` and runs four stages:
 
 ## 2) Capture image — `takePicture.py`
 
-* **Camera:** Raspberry Pi + PiCamera2.
+* **Camera:** Raspberry Pi + PiCamera3.
 * **Mode:** High-res stills, **continuous AF** enabled; AE/AWB left on (can be pinned after first frame).
 * **Flow:** Reuses a single PiCamera2 instance for low latency; warms up, locks exposure if requested, captures to `Input/`.
 * **Image format:** JPEG (configurable), EXIF timestamp preserved.
