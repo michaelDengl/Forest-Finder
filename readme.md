@@ -220,6 +220,7 @@ When a card cannot be identified:
 * Keep the motor load modest when powering from Pi 5V (USB supply limits!).
 * You can tweak crop ratios in `preprocess_title_region_working()` to match your framing.
 * The CSV now has `card` and `reason` columns for easier troubleshooting.
+* To checkout Code for version 1.0 -> git checkout v1.0
 
 ---
 
