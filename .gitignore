@@ -16,3 +16,6 @@ Output/*.csv
 
 # Bytecode caches anywhere
 **/__pycache__/
+
+__pycache__/
+*.pyc
