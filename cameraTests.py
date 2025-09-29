@@ -1,30 +1,30 @@
 from picamera2 import Picamera2
 from datetime import datetime
-import os
-import time
+import os, time, json
 
-# === Configuration ===
-OUTPUT_FOLDER = "/home/lubuharg/Documents/MTG/Input"
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+OUTPUT = "/home/lubuharg/Documents/MTG/Input"
+FOCUS_FILE = "/home/lubuharg/Documents/MTG/config/focus.json"
+os.makedirs(OUTPUT, exist_ok=True)
 
-# Filename with timestamp
-filename = f"mtg_photo_{datetime.now().strftime('%Y.%m.%d_%H-%M-%S')}.jpg"
-filepath = os.path.join(OUTPUT_FOLDER, filename)
+with open(FOCUS_FILE) as f:
+    lens_pos = json.load(f)["LensPosition"]
 
-# Initialize camera
 picam2 = Picamera2()
 picam2.configure(picam2.create_still_configuration())
-
 picam2.start()
-time.sleep(1)
+time.sleep(0.2)
 
-# Enable AF and start it
-picam2.set_controls({"AfMode": 1})  # Continuous autofocus mode
-picam2.set_controls({"AfTrigger": 0})  # Start autofocus once
+# Switch to manual focus & apply stored lens position
+try:
+    from libcamera import controls
+    picam2.set_controls({"AfMode": controls.AfModeEnum.Manual, "LensPosition": lens_pos})
+except Exception:
+    # Fallback constants work on many builds: 0=Manual
+    print("Autofocus")
+    picam2.set_controls({"AfMode": 0, "LensPosition": lens_pos})
 
-# Give it a moment to adjust focus
-time.sleep(2)
-
-# Capture image
+# Snap fast (no AF delay)
+filename = f"mtg_photo_{datetime.now().strftime('%Y.%m.%d_%H-%M-%S')}.jpg"
+filepath = os.path.join(OUTPUT, filename)
 picam2.capture_file(filepath)
-print(f"[INFO] Image saved to: {filepath}")
+print(f"[INFO] Saved: {filepath}")

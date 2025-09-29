@@ -1,0 +1,12 @@
+geometry:
+  detect:
+    min_area_ratio: 0.10         # % of frame
+    aspect_range: [0.65, 0.80]   # H/W for rectified perspective
+    max_quad_epsilon: 0.02       # approxPolyDP epsilon as % perimeter
+    min_solidity: 0.90
+    feature:
+      nfeatures: 1000
+      match_ratio: 0.75          # Lowe ratio test
+      ransac_thresh: 3.0         # reprojection px
+    prefer: "contours"           # or "features"
+    debug: false
