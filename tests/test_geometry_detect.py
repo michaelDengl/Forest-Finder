@@ -3,6 +3,9 @@ Pytest for Story 1: Robust Card Detection with feature fallback.
 These tests generate synthetic images on the fly, so no test assets are required.
 """
 from __future__ import annotations
+import os
+import uuid
+
 import numpy as np
 import cv2
 import pytest
@@ -71,6 +74,27 @@ def _add_shadow(frame: np.ndarray) -> np.ndarray:
     shadow = cv2.GaussianBlur(shadow, (51, 51), 0)
     return cv2.addWeighted(overlay, 1.0, shadow, 0.25, 0)
 
+# ---------- Debug helper (NEW) ---------- #
+
+def _debug_visualize_on_low_iou(frame: np.ndarray,
+                                true_corners: np.ndarray,
+                                got_corners: np.ndarray,
+                                iou: float,
+                                tag: str = "feature_fallback") -> None:
+    """
+    If IoU is low, draw GT (green) and predicted (red) quads and save a PNG to tests/output/.
+    """
+    try:
+        dbg = frame.copy()
+        cv2.polylines(dbg, [true_corners.astype(np.int32)], True, (0, 255, 0), 2)  # green = GT
+        cv2.polylines(dbg, [got_corners.astype(np.int32)], True, (0, 0, 255), 2)   # red = predicted
+        os.makedirs("tests/output", exist_ok=True)
+        fname = f"tests/output/{tag}_{str(uuid.uuid4())[:8]}_iou_{iou:.3f}.png"
+        cv2.imwrite(fname, dbg)
+        print(f"[debug] Saved low-IoU visualization → {fname}")
+    except Exception as e:
+        print(f"[debug] Failed to save visualization: {e}")
+
 # ---------- Tests ---------- #
 
 def test_order_corners_clockwise_basic():
@@ -86,17 +110,17 @@ def test_detect_by_contours_happy_path():
     frame, _ = _place_card_in_frame(template)
     frame = _add_shadow(frame)
     cfg = {
-    "prefer": "features",
-    "debug": True,
-    "feature": {
-        "nfeatures": 6000,
-        "ratio": 0.90,        # was 0.98 — much stricter
-        "ransac_thresh": 3.0, # was 8.0 — tighter model
-        "min_inliers": 12,    # was 3  — avoid flimsy H
-    },
-    "min_area_ratio": 0.002,
-    "aspect_range": (0.4, 2.6),
-}
+        "prefer": "features",
+        "debug": True,
+        "feature": {
+            "nfeatures": 6000,
+            "ratio": 0.90,        # was 0.98 — much stricter
+            "ransac_thresh": 3.0, # was 8.0 — tighter model
+            "min_inliers": 12,    # was 3  — avoid flimsy H
+        },
+        "min_area_ratio": 0.002,
+        "aspect_range": (0.4, 2.6),
+    }
 
     # Override with lenient, synthetic-friendly settings + debug
     cfg.update({
@@ -106,9 +130,6 @@ def test_detect_by_contours_happy_path():
         "min_area_ratio": 0.002,   # accept small minAreaRect fallback
         "aspect_range": (0.4, 2.6),
     })
-
-
-
 
     got = detect_by_contours(frame, cfg)
     assert isinstance(got, Corners)
@@ -152,5 +173,31 @@ def test_feature_fallback_works():
     inter = np.logical_and(m_true > 0, m_got > 0).sum()
     union = np.logical_or(m_true > 0, m_got > 0).sum()
     iou = inter / max(1, union)
+
+    # NEW: save a visualization when IoU is low to speed up debugging
+    if iou < 0.7:
+        _debug_visualize_on_low_iou(frame, true_corners, pts, iou, tag="feature_fallback")
+
     assert iou >= 0.7
 
+def test_low_iou_visualization_writes_file():
+    # Make a simple black frame
+    frame = np.zeros((200, 300, 3), np.uint8)
+
+    # Ground truth square (green) and a shifted predicted square (red) to ensure low IoU
+    true_corners = np.array([[10, 10], [110, 10], [110, 110], [10, 110]], dtype=np.float32)
+    got_corners  = true_corners + 80  # shift so they barely overlap
+    fake_iou = 0.2  # definitely < 0.7
+
+    # Capture directory contents before
+    outdir = "tests/output"
+    before = set(os.listdir(outdir)) if os.path.isdir(outdir) else set()
+
+    # Call the hook directly
+    _debug_visualize_on_low_iou(frame, true_corners, got_corners, fake_iou, tag="viz_test")
+
+    # Check that at least one new PNG appeared with our tag
+    after = set(os.listdir(outdir))
+    new_files = sorted(list(after - before))
+    assert any(f.startswith("viz_test_") and f.endswith(".png") for f in new_files), \
+        "Expected a visualization PNG to be created in tests/output/"

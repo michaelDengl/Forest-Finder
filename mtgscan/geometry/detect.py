@@ -8,10 +8,11 @@ from mtgscan.core.contracts import Corners
 
 # Defaults tuned for Raspberry Pi + OpenCV 4.6 and our synthetic tests
 _DEFAULT_CFG: Dict = {
-    "min_area_ratio": 0.05,            # card must cover >= 5% of frame
-    "aspect_range": (0.70, 2.00),      # wide for synthetic; tighten in prod to (1.25, 1.55)
-    "max_quad_epsilon": 0.02,          # approxPolyDP epsilon as % perimeter
-    "min_solidity": 0.85,              # area / hull_area
+    # ↓ relaxed to allow smaller/further cards in real photos
+    "min_area_ratio": 0.001,           # was 0.005
+    "aspect_range": (0.40, 3.00),      # was (0.5, 2.2)
+    "max_quad_epsilon": 0.08,          # was 0.05
+    "min_solidity": 0.75,              # was 0.80
     "canny": {"low": 75, "high": 200},
     "blur": {"ksize": 5},
     "feature": {
@@ -21,8 +22,18 @@ _DEFAULT_CFG: Dict = {
         "min_inliers": 8
     },
     "prefer": "contours",
-    "debug": False
+    "debug": False,
+
+    # --- automatic fallback pass if nothing is detected on the first pass
+    "auto_relax": True,
+    "relax": {
+        "min_area_ratio": 0.001,
+        "aspect_range": (0.40, 3.00),
+        "max_quad_epsilon": 0.08,
+        "min_solidity": 0.75
+    }
 }
+
 
 # ----------------------------------------------------------------------------- #
 # Config / utilities                                                            #
@@ -353,7 +364,6 @@ def detect_by_features(frame: np.ndarray, template: Optional[np.ndarray], cfg: O
     # Cross-check (strict) + mutual-good intersection
     bf_x = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
     mm_x = bf_x.match(dest, desf)  # strict symmetric matches
-    # Build (q,t) sets for fast intersection
     set_good: Set[Tuple[int,int]] = {(m.queryIdx, m.trainIdx) for m in good}
     mutual = [m for m in mm_x if (m.queryIdx, m.trainIdx) in set_good]
 
@@ -364,7 +374,6 @@ def detect_by_features(frame: np.ndarray, template: Optional[np.ndarray], cfg: O
     if len(good) < 4 and len(mutual) < 4:
         return None
 
-    # Build arrays
     src_pts = np.float32([kpt[m.queryIdx].pt for m in good]).reshape(-1, 1, 2) if len(good) >= 4 else None
     dst_pts = np.float32([kpf[m.trainIdx].pt for m in good]).reshape(-1, 1, 2) if len(good) >= 4 else None
     src_pts_mut = np.float32([kpt[m.queryIdx].pt for m in mutual]).reshape(-1, 1, 2) if len(mutual) >= 4 else None
@@ -388,7 +397,6 @@ def detect_by_features(frame: np.ndarray, template: Optional[np.ndarray], cfg: O
             if cfg.get("debug"):
                 print(f"[mutual] inliers={int(maskm.sum())} hullOv={ov_m:.2f}")
 
-            # Strong spatial agreement → return immediately
             if ov_m >= 0.65:
                 return Corners(pts=mapped_m.astype(np.float32))
 
@@ -396,7 +404,6 @@ def detect_by_features(frame: np.ndarray, template: Optional[np.ndarray], cfg: O
     dst_xy_all = dst_pts.reshape(-1, 2) if dst_pts is not None else np.empty((0,2), np.float32)
     candidates: List[np.ndarray] = []
 
-    # First homography from loose matches
     Hmat, mask = (cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, ransac) if (src_pts is not None and dst_pts is not None) else (None, None))
     inliers_xy = _inliers_from_mask(dst_pts, mask) if (dst_pts is not None) else np.empty((0,2), np.float32)
 
@@ -543,9 +550,7 @@ def detect_by_features(frame: np.ndarray, template: Optional[np.ndarray], cfg: O
         s -= 0.45 * min(2.0, d_norm)
         if s > best_score: best_score = s; best_quad = q
 
-
-
-    # --- Final scoring: add hull-overlap bonus & stronger center bias
+    # --- Final scoring: add hull-overlap bonus & stronger center bias (duplicate kept)
     best_quad = None
     best_score = -1.0
     scoring_for_score = scoring_xy
@@ -568,17 +573,60 @@ def detect_by_features(frame: np.ndarray, template: Optional[np.ndarray], cfg: O
 
     return Corners(pts=best_quad.astype(np.float32))
 
-# -----------------------------------------------------------------------------
-# Public entrypoint
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
+# Public entrypoint                                                              #
+# ----------------------------------------------------------------------------- #
+
+def _relaxed_cfg(cfg: Dict) -> Dict:
+    """Build a second-pass config that widens the gates but preserves user overrides where they’re already looser."""
+    r = dict(cfg)
+    relax = cfg.get("relax", {})
+    # Only loosen — never tighten user-supplied values
+    r["min_area_ratio"]   = min(float(cfg.get("min_area_ratio", 0.005)), float(relax.get("min_area_ratio", 0.001)))
+    lo, hi = cfg.get("aspect_range", (0.5, 2.2))
+    r_lo, r_hi = relax.get("aspect_range", (0.40, 3.00))
+    r["aspect_range"] = (min(lo, r_lo), max(hi, r_hi))
+    r["max_quad_epsilon"] = max(float(cfg.get("max_quad_epsilon", 0.05)), float(relax.get("max_quad_epsilon", 0.08)))
+    r["min_solidity"]     = min(float(cfg.get("min_solidity", 0.80)), float(relax.get("min_solidity", 0.75)))
+    return r
 
 def detect(frame: np.ndarray, cfg: Optional[Dict] = None, template: Optional[np.ndarray] = None) -> Optional[Corners]:
     cfg = _merge_cfg(cfg)
-    if cfg.get("prefer", "contours") == "contours":
-        c = detect_by_contours(frame, cfg)
-        if c is not None:
-            return c
-        return detect_by_features(frame, template, cfg) if template is not None else None
-    else:
-        c = detect_by_features(frame, template, cfg) if template is not None else None
-        return c if c is not None else detect_by_contours(frame, cfg)
+    if cfg.get("debug"):
+        print("[detect] merged cfg:", {
+            "prefer": cfg.get("prefer"),
+            "min_area_ratio": cfg.get("min_area_ratio"),
+            "aspect_range": cfg.get("aspect_range"),
+            "max_quad_epsilon": cfg.get("max_quad_epsilon"),
+            "min_solidity": cfg.get("min_solidity"),
+            "auto_relax": cfg.get("auto_relax", True)
+        })
+
+    def _run_once(effective_cfg: Dict) -> Optional[Corners]:
+        if effective_cfg.get("prefer", "contours") == "contours":
+            c = detect_by_contours(frame, effective_cfg)
+            if c is not None:
+                return c
+            return detect_by_features(frame, template, effective_cfg) if template is not None else None
+        else:
+            c = detect_by_features(frame, template, effective_cfg) if template is not None else None
+            return c if c is not None else detect_by_contours(frame, effective_cfg)
+
+    # Pass 1: user/CLI config
+    result = _run_once(cfg)
+    if result is not None:
+        return result
+
+    # Optional Pass 2: auto-relax if nothing found
+    if cfg.get("auto_relax", True):
+        rcfg = _relaxed_cfg(cfg)
+        if cfg.get("debug"):
+            print("[detect] no result → relaxing gates:", {
+                "min_area_ratio": rcfg.get("min_area_ratio"),
+                "aspect_range": rcfg.get("aspect_range"),
+                "max_quad_epsilon": rcfg.get("max_quad_epsilon"),
+                "min_solidity": rcfg.get("min_solidity"),
+            })
+        return _run_once(rcfg)
+
+    return None
