@@ -9,30 +9,36 @@ from mtgscan.core.contracts import Corners
 # Defaults tuned for Raspberry Pi + OpenCV 4.6 and our synthetic tests
 _DEFAULT_CFG: Dict = {
     # ↓ relaxed to allow smaller/further cards in real photos
-    "min_area_ratio": 0.001,           # was 0.005
-    "aspect_range": (0.40, 3.00),      # was (0.5, 2.2)
-    "max_quad_epsilon": 0.08,          # was 0.05
-    "min_solidity": 0.75,              # was 0.80
+    "min_area_ratio": 0.001,           # relative to frame area
+    "min_abs_area_px": 400.0,          # NEW: absolute minimum area in pixels
+    "max_area_ratio": 0.95,            # already used by _choose_best_quad
+    "aspect_range": (0.40, 3.00),
+    "max_quad_epsilon": 0.08,
+    "min_solidity": 0.75,
     "canny": {"low": 75, "high": 200},
     "blur": {"ksize": 5},
-    "feature": {
-        "nfeatures": 2000,
-        "ratio": 0.85,
-        "ransac_thresh": 5.0,
-        "min_inliers": 8
-    },
+    "feature": {"nfeatures": 2000, "ratio": 0.85, "ransac_thresh": 5.0, "min_inliers": 8},
     "prefer": "contours",
     "debug": False,
 
-    # --- automatic fallback pass if nothing is detected on the first pass
     "auto_relax": True,
     "relax": {
-        "min_area_ratio": 0.001,
+        "min_area_ratio": 0.0005,      # NEW: relax more than first pass
+        "min_abs_area_px": 250.0,      # NEW: relaxed absolute area
         "aspect_range": (0.40, 3.00),
         "max_quad_epsilon": 0.08,
         "min_solidity": 0.75
-    }
+    },
+
+    # MTG-likeness helpers
+    "card_aspect": 1.395,
+    "card_aspect_tol": 0.18,
+    "card_border_min": 0.22,
+
+    # contour housekeeping
+    "border_margin_px": 6,
 }
+
 
 
 # ----------------------------------------------------------------------------- #
@@ -74,10 +80,14 @@ def is_plausible_quad(pts: np.ndarray, frame_shape: Tuple[int, int, int], cfg: O
     area = abs(cv2.contourArea(pts))
     area_ratio = area / frame_area if frame_area > 0 else 0.0
     min_ratio = float(cfg["min_area_ratio"])
+    min_abs   = float(cfg.get("min_abs_area_px", 0.0))
     eps = 5e-6
-    if area <= eps or area_ratio + eps < min_ratio:
+
+    # NEW: pass if EITHER relative OR absolute size is large enough
+    if not ((area_ratio + eps >= min_ratio) or (area + eps >= min_abs)):
         if cfg.get("debug"):
-            print(f"[plaus] area fail: area={area:.1f}, ratio={area_ratio:.4f}, min={min_ratio}")
+            print(f"[plaus] area fail: area={area:.1f}, ratio={area_ratio:.4f}, "
+                  f"need ratio>={min_ratio} OR area>={min_abs}")
         return False
 
     hull = cv2.convexHull(pts.reshape(-1, 1, 2))
@@ -100,6 +110,8 @@ def is_plausible_quad(pts: np.ndarray, frame_shape: Tuple[int, int, int], cfg: O
     if cfg.get("debug"):
         print(f"[plaus] area%={(area_ratio):.4f}, aspect={aspect:.3f}, range=({a_min},{a_max}) -> {ok_aspect}")
     return ok_aspect
+
+
 
 def _clip_quad(pts: np.ndarray, frame_shape) -> np.ndarray:
     H, W = frame_shape[:2]
@@ -227,63 +239,199 @@ def _fixed_aspect_rect_from_points(dst_xy: np.ndarray, aspect: float, cover_q: f
     return order_corners_clockwise(quad.astype(np.float32))
 
 # ----------------------------------------------------------------------------- #
+# MTG-card likeness helpers (orientation invariant aspect + border contrast)     #
+# ----------------------------------------------------------------------------- #
+
+def _quad_hw(quad: np.ndarray) -> Tuple[float, float]:
+    q = np.asarray(quad, np.float32).reshape(4, 2)
+    def d(a, b) -> float: return math.hypot(float(a[0]-b[0]), float(a[1]-b[1]))
+    tl, tr, br, bl = q
+    w = 0.5 * (d(tl, tr) + d(bl, br))
+    h = 0.5 * (d(tl, bl) + d(tr, br))
+    return h, w
+
+def _orientation_invariant_aspect(h: float, w: float) -> float:
+    if h <= 1e-3 or w <= 1e-3:
+        return 0.0
+    a = h / w
+    return max(a, 1.0 / a)
+
+def _warp_quad(frame: np.ndarray, quad: np.ndarray, out_hw=(1050, 750)) -> np.ndarray:
+    Ht, Wt = out_hw
+    dst = np.float32([[0,0],[Wt-1,0],[Wt-1,Ht-1],[0,Ht-1]])
+    M = cv2.getPerspectiveTransform(np.asarray(quad, np.float32), dst)
+    return cv2.warpPerspective(frame, M, (Wt, Ht))
+
+def _border_contrast_score(warp: np.ndarray) -> float:
+    g = cv2.cvtColor(warp, cv2.COLOR_BGR2GRAY)
+    H, W = g.shape
+    m   = max(2, int(0.02 * min(H, W)))      # outer ring thickness
+    i1  = max(6, int(0.06 * min(H, W)))      # inner ring start
+    i2  = max(i1 + 1, int(0.12 * min(H, W))) # inner ring end
+
+    outer = np.zeros_like(g, np.uint8)
+    inner = np.zeros_like(g, np.uint8)
+
+    cv2.rectangle(outer, (0,0), (W-1, H-1), 255, thickness=m)
+    cv2.rectangle(inner, (i1,i1), (W-1-i1, H-1-i1), 255, thickness=i2 - i1)
+
+    mo = float(g[outer > 0].mean()) if (outer > 0).any() else 255.0
+    mi = float(g[inner > 0].mean()) if (inner > 0).any() else 0.0
+
+    diff = max(0.0, (mi - mo))  # positive if border darker
+    rng  = max(1.0, float(g.max() - g.min()))
+    return float(np.clip(diff / rng * 2.5, 0.0, 1.0))
+
+def is_mtg_card_like(frame: np.ndarray, quad: np.ndarray, cfg: Optional[Dict] = None) -> Tuple[bool, float]:
+    """
+    Extra orientation-invariant gate for MTG card shape + dark outer border.
+    Returns (ok, border_score[0..1]).
+    """
+    cfg = _merge_cfg(cfg)
+    h, w = _quad_hw(quad)
+    A = _orientation_invariant_aspect(h, w)
+    A0  = float(cfg.get("card_aspect", _DEFAULT_CFG["card_aspect"]))
+    tol = float(cfg.get("card_aspect_tol", _DEFAULT_CFG["card_aspect_tol"]))
+    a_min, a_max = (A0 * (1.0 - tol), A0 * (1.0 + tol))
+    if not (a_min <= A <= a_max):
+        return False, 0.0
+
+    warp   = _warp_quad(frame, quad, out_hw=(1050, 750))
+    bscore = _border_contrast_score(warp)
+    return (bscore >= float(cfg.get("card_border_min", _DEFAULT_CFG["card_border_min"]))), bscore
+
+# ----------------------------------------------------------------------------- #
 # Contour path                                                                   #
 # ----------------------------------------------------------------------------- #
 
 def detect_by_contours(frame: np.ndarray, cfg: Optional[Dict] = None) -> Optional[Corners]:
     cfg = _merge_cfg(cfg)
+    H, W = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    # light blur to stabilize thresholds
     k = int(cfg["blur"]["ksize"])
     if k > 1:
         if k % 2 == 0: k += 1
         gray_blur = cv2.GaussianBlur(gray, (k, k), 0)
     else:
         gray_blur = gray
+
     def _binary_candidates(g):
+        # multiple binarizations to cope with lighting / backgrounds
         _, b1 = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         _, b2 = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         b3 = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 5)
         return [b1, b2, b3]
+
+    # Try binarizations first
     for b in _binary_candidates(gray_blur):
         b = cv2.morphologyEx(b, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), 1)
-        cnts, _ = cv2.findContours(b, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # IMPORTANT: scan all contours, not just external, to find inner card on a page
+        cnts, _ = cv2.findContours(b, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         corners = _choose_best_quad(cnts, frame, cfg)
-        if corners is not None: return corners
+        if corners is not None:
+            return corners
+
+    # Then try edges
     edges = cv2.Canny(gray_blur, cfg["canny"]["low"], cfg["canny"]["high"])
     edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), 1)
-    cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     return _choose_best_quad(cnts, frame, cfg)
 
+
 def _choose_best_quad(cnts, frame: np.ndarray, cfg: Dict) -> Optional[Corners]:
-    if not cnts: return None
+    if not cnts:
+        return None
+
     H, W = frame.shape[:2]
     frame_area = float(H * W)
-    cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
     eps_scale = float(cfg["max_quad_epsilon"])
+    max_area_ratio = float(cfg.get("max_area_ratio", 0.97))
+    border_margin = int(cfg.get("border_margin_px", 6))
+    want_aspect = float(cfg.get("card_aspect", 0.0)) or None
+
+    # sort by area, biggest first (likely the page)
+    cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
+
+    # Helper: skip contours touching the image border
+    def touches_border(rect):
+        x, y, w, h = rect
+        if x <= border_margin or y <= border_margin:
+            return True
+        if x + w >= W - border_margin or y + h >= H - border_margin:
+            return True
+        return False
+
+    candidates: List[np.ndarray] = []
+    big_rejected_once = False
+
     for c in cnts:
+        if len(c) < 4:
+            continue
+
+        rect = cv2.boundingRect(c)
+        if touches_border(rect):
+            # likely the full frame/page edge; skip
+            continue
+
         peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, eps_scale * peri, True)
+
+        # Try direct 4-vertex approx; otherwise minAreaRect as fallback
         pts = None
+        approx = cv2.approxPolyDP(c, eps_scale * peri, True)
         if len(approx) == 4:
             pts = approx.reshape(4, 2).astype(np.float32)
         else:
+            # try more aggressive eps to coerce to 4
             for factor in (1.5, 2.0, 3.0):
                 approx2 = cv2.approxPolyDP(c, eps_scale * factor * peri, True)
                 if len(approx2) == 4:
-                    pts = approx2.reshape(4, 2).astype(np.float32); break
+                    pts = approx2.reshape(4, 2).astype(np.float32)
+                    break
             if pts is None:
                 box = cv2.boxPoints(cv2.minAreaRect(c))
                 pts = box.astype(np.float32)
+
         pts = order_corners_clockwise(pts)
-        if not is_plausible_quad(pts, frame.shape, cfg): continue
-        area = cv2.contourArea(pts)
-        hull = cv2.convexHull(pts)
-        hull_area = cv2.contourArea(hull)
-        solidity = (area / hull_area) if hull_area > 0 else 0.0
-        if solidity < cfg["min_solidity"]: continue
-        if (area / frame_area) < cfg["min_area_ratio"]: continue
-        return Corners(pts=pts.astype(np.float32))
-    return None
+
+        # Drop anything too huge (page) before plausibility (fast path)
+        area = float(abs(cv2.contourArea(pts)))
+        if area / frame_area > max_area_ratio:
+            if not big_rejected_once and cfg.get("debug"):
+                print(f"[contours] skip giant: area_ratio={area/frame_area:.3f} > {max_area_ratio}")
+            big_rejected_once = True
+            continue
+
+        # Standard plausibility (area, aspect band, solidity, etc.)
+        if not is_plausible_quad(pts, frame.shape, cfg):
+            continue
+
+        # Favor MTG-like aspect if configured: compute penalty (lower better)
+        if want_aspect:
+            tl, tr, br, bl = pts
+            def d(a,b): return math.hypot(float(a[0]-b[0]), float(a[1]-b[1]))
+            w = (d(tl,tr) + d(bl,br)) / 2.0
+            h = (d(tl,bl) + d(tr,br)) / 2.0
+            if w > 1e-3 and h > 1e-3:
+                aspect = h / w
+                # symmetry: consider 1/aspect also since card might be rotated
+                delta = min(abs(math.log(aspect / want_aspect)), abs(math.log((1.0/aspect) / want_aspect)))
+            else:
+                delta = 1e9
+        else:
+            delta = 0.0
+
+        candidates.append((pts, area, delta))
+
+    if not candidates:
+        return None
+
+    # Rank: prefer larger (but not huge) + aspect closeness when available
+    candidates.sort(key=lambda t: (-t[1], t[2]))
+    best = candidates[0][0].astype(np.float32)
+    return Corners(pts=best)
+
 
 # ----------------------------------------------------------------------------- #
 # Match clustering (k-means)                                                     #
@@ -578,17 +726,23 @@ def detect_by_features(frame: np.ndarray, template: Optional[np.ndarray], cfg: O
 # ----------------------------------------------------------------------------- #
 
 def _relaxed_cfg(cfg: Dict) -> Dict:
-    """Build a second-pass config that widens the gates but preserves user overrides where they’re already looser."""
     r = dict(cfg)
     relax = cfg.get("relax", {})
-    # Only loosen — never tighten user-supplied values
-    r["min_area_ratio"]   = min(float(cfg.get("min_area_ratio", 0.005)), float(relax.get("min_area_ratio", 0.001)))
+    r["min_area_ratio"] = min(float(cfg.get("min_area_ratio", 0.005)),
+                              float(relax.get("min_area_ratio", 0.0005)))
+    # NEW: absolute area relax
+    r["min_abs_area_px"] = min(float(cfg.get("min_abs_area_px", 400.0)),
+                               float(relax.get("min_abs_area_px", 250.0)))
+
     lo, hi = cfg.get("aspect_range", (0.5, 2.2))
     r_lo, r_hi = relax.get("aspect_range", (0.40, 3.00))
     r["aspect_range"] = (min(lo, r_lo), max(hi, r_hi))
-    r["max_quad_epsilon"] = max(float(cfg.get("max_quad_epsilon", 0.05)), float(relax.get("max_quad_epsilon", 0.08)))
-    r["min_solidity"]     = min(float(cfg.get("min_solidity", 0.80)), float(relax.get("min_solidity", 0.75)))
+    r["max_quad_epsilon"] = max(float(cfg.get("max_quad_epsilon", 0.05)),
+                                float(relax.get("max_quad_epsilon", 0.08)))
+    r["min_solidity"] = min(float(cfg.get("min_solidity", 0.80)),
+                            float(relax.get("min_solidity", 0.75)))
     return r
+
 
 def detect(frame: np.ndarray, cfg: Optional[Dict] = None, template: Optional[np.ndarray] = None) -> Optional[Corners]:
     cfg = _merge_cfg(cfg)
