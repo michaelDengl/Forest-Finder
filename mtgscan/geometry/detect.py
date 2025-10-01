@@ -40,10 +40,25 @@ _DEFAULT_CFG: Dict = {
 }
 
 
-
 # ----------------------------------------------------------------------------- #
 # Config / utilities                                                            #
 # ----------------------------------------------------------------------------- #
+
+def card_likeness_score(quad: np.ndarray, frame: np.ndarray, cfg: Dict) -> float:
+    """Return a 0..1 score for how much this quad looks like an MTG card."""
+    H, W = frame.shape[:2]
+    if quad is None or quad.shape != (4, 2):
+        return 0.0
+
+    # Aspect check
+    aspect = (np.linalg.norm(quad[1] - quad[0]) + np.linalg.norm(quad[2] - quad[3])) / \
+             (np.linalg.norm(quad[3] - quad[0]) + np.linalg.norm(quad[2] - quad[1]) + 1e-6)
+    aspect_target = cfg.get("card_aspect", 1.395)
+    tol = cfg.get("card_aspect_tol", 0.18)
+    aspect_ok = (1 - tol) * aspect_target <= aspect <= (1 + tol) * aspect_target
+
+    # Very simple scoring right now (aspect only)
+    return 1.0 if aspect_ok else 0.0
 
 def _merge_cfg(cfg: Optional[Dict]) -> Dict:
     if not cfg:
