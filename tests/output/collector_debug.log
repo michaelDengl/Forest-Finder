@@ -1,0 +1,10 @@
+OCR try cfg= 7  → '225/287' (0.18)
+OCR try cfg= 6  → '225/287' (0.18)
+OCR try cfg= 7  → 'BROENI' (-0.01)
+OCR try cfg= 8  → 'BROENOI' (-0.01)
+OCR try cfg= 13 → 'BROENOI' (-0.01)
+OCR try cfg= 6  → 'BROENI' (-0.01)
+OCR try cfg= 7  → 'EN R PA' (0.08)
+OCR try cfg= 13 → 'BAV' (-0.01)
+Fallback1 (whole) → EN R PA (0.08)
+FINAL raw='225/287 BROENOI'  num=225  set=BRO

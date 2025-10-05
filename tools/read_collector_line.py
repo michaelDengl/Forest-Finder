@@ -1,4 +1,4 @@
-# tools/read_collector_line.py (replace main body)
+# tools/read_collector_line.py
 #!/usr/bin/env python3
 import sys, argparse, cv2
 from pathlib import Path
@@ -9,7 +9,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("rectified")
     ap.add_argument("--resize", action="store_true")
-    ap.add_argument("--dump", action="store_true", help="save binarized sub-ROIs next to input")
+    ap.add_argument("--dump", action="store_true")
     args = ap.parse_args()
 
     p = Path(args.rectified)
@@ -24,14 +24,16 @@ def main():
 
     r = extract_collector_roi(img)
     out = read_collector_line(r.crop)
+
     print(f"template={r.template} holo={r.meta.get('holo_detected')}")
     print(f"raw='{out['raw']}'  conf={out['conf']:.2f}")
-    print(f"set_code={out['set_code']}  collector_number={out['collector_number']}")
+    print(f"set_code={out['set_code']}  collector_number={out['collector_number']}  language={out.get('language')}")
+    #                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     if args.dump:
         num_bgr, set_bgr = _split_blocks(r.crop)
         num_bin = _prep(num_bgr, scale=4)
-        set_bin = _prep(set_bgr, scale=4)
+        set_bin = _prep(set_bgr, scale=6)
         cv2.imwrite(str(p.with_name(p.stem+"_num_bin.png")), num_bin)
         cv2.imwrite(str(p.with_name(p.stem+"_set_bin.png")), set_bin)
         print("[DBG] wrote", p.with_name(p.stem+"_num_bin.png"), "and", p.with_name(p.stem+"_set_bin.png"))
