@@ -8,3 +8,49 @@ OCR try cfg= 7  → 'EN R PA' (0.08)
 OCR try cfg= 13 → 'BAV' (-0.01)
 Fallback1 (whole) → EN R PA (0.08)
 FINAL raw='225/287 BROENOI'  num=225  set=BRO
+OCR try cfg= 7  → '225/287' (0.18)
+OCR try cfg= 6  → '225/287' (0.18)
+OCR try cfg= 7  → 'BROENI' (-0.01)
+OCR try cfg= 8  → 'BROENOI' (-0.01)
+OCR try cfg= 13 → 'BROENOI' (-0.01)
+OCR try cfg= 6  → 'BROENI' (-0.01)
+OCR try cfg= 7  → 'EN R PA' (0.08)
+OCR try cfg= 13 → 'BAV' (-0.01)
+Fallback1 (whole) → EN R PA (0.08)
+FINAL raw='225/287 BROENOI'  num=225  set=BRO
+OCR try cfg= 7   → '225/287' (0.18)
+OCR try cfg= 7   → 'BROENDR' (-0.00)
+FINAL raw='225/287 BROENDR'  num=225  set=BRO
+OCR try cfg= 7   → '225/287' (0.18)
+OCR try cfg= 7   → 'BROENDR' (-0.00)
+FINAL raw='225/287 BROENDR'  num=225  set=BRO
+OCR try cfg= 7   → '225/287' (0.18)
+OCR try cfg= 7   → 'BROENDR' (-0.00)
+FINAL raw='225/287 BROENDR'  num=225 (slash)  set=BRO
+OCR try cfg= 7   → 'GFowrrey' (-0.00)
+OCR try cfg= 7   → 'O' (-0.00)
+FINAL raw='GFowrrey O'  num=None (none)  set=None
+OCR try cfg= 7   → 'GFowrrey' (-0.00)
+[num] no pattern matched
+OCR try cfg= 7   → 'O' (-0.00)
+FINAL raw='GFowrrey O'  num=None (none)  set=None
+OCR try cfg= 7   → '225/287' (0.18)
+[num] matched slash: '225/287' → '225'
+OCR try cfg= 7   → 'BROENDR' (-0.00)
+FINAL raw='225/287 BROENDR'  num=225 (slash)  set=BRO
+OCR try cfg= 7   → 'GFowrrey' (-0.00)
+[num] no pattern matched
+OCR try cfg= 7   → 'O' (-0.00)
+FINAL raw='GFowrrey O'  num=None (none)  set=None
+OCR try cfg= 7   → '' (-0.01)
+[num] no pattern matched
+OCR try cfg= 7   → 'VON' (-0.01)
+FINAL raw='VON'  num=None (none)  set=VON
+OCR try cfg= 7   → '' (-0.01)
+[num] no pattern matched
+OCR try cfg= 7   → 'VON' (-0.01)
+FINAL raw='VON'  num=None (none)  set=VON
+OCR try cfg= 7   → '225/287' (0.18)
+[num] matched slash: '225/287' → '225'
+OCR try cfg= 7   → 'BROENDR' (-0.00)
+FINAL raw='225/287 BROENDR'  num=225 (slash)  set=BRO
