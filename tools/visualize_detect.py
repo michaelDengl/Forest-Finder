@@ -127,7 +127,7 @@ def main():
     # TEMP: relax filters so we can see what the detector *would* pick
     "require_portrait": False,      # turn off portrait gate for now
     "min_area_ratio": 0.0015,       # allow smaller candidates
-    "min_abs_area_px": 8000.0,      # slightly relaxed absolute area
+    #"min_abs_area_px": 8000.0,      # slightly relaxed absolute area
     }  
 
     if args.min_area_ratio is not None:

@@ -1,6 +1,15 @@
 # /home/lubuharg/Documents/MTG/screen_app/menu_app.py
 import os
 import subprocess
+import sys
+from pathlib import Path
+import json   # <-- add this
+import cv2
+import threading
+import time
+import numpy as np
+from picamera2 import Picamera2
+from libcamera import controls   # <-- add this
 
 # Kivy env
 os.environ["KIVY_NO_ARGS"] = "1"
@@ -29,9 +38,18 @@ from kivy.uix.gridlayout import GridLayout
 from kivy.core.window import Window
 from kivy.clock import Clock
 from kivy.animation import Animation
+from kivy.graphics.texture import Texture
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent  # /home/.../Documents/MTG
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from mtgscan.geometry.detect import detect
+
 
 # --------- CONSTANTS / PATHS ---------
 SPLASH_IMAGE = "/home/lubuharg/Documents/MTG/Documents/Forest Finder Logo.jpg"
+FOCUS_FILE = "/home/lubuharg/Documents/MTG/config/focus.json"
 
 # Base dir = folder where THIS script lives: /home/.../MTG/screen_app
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +60,7 @@ TESTS_DIR = os.path.join(BASE_DIR, "..", "tests")
 TEST_SORTER = os.path.join(TESTS_DIR, "test_servoMotor360.py")      # Sorter
 TEST_DROPPER = os.path.join(TESTS_DIR, "test_servoMotor180.py")     # Card Dropper
 TEST_PULLER = os.path.join(TESTS_DIR, "test_servoMotor360v2.py")    # Card Puller
+
 
 
 # --------- WIFI HELPERS (NetworkManager / nmcli) ---------
@@ -498,6 +517,11 @@ class WlanSettingsScreen(Screen):
 
 
 # ---------------- Debug Screen ----------------
+
+# ---------------- Debug Screen ----------------
+
+# ---------------- Debug Screen ----------------
+
 class DebugScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(name="debug", **kwargs)
@@ -514,7 +538,7 @@ class DebugScreen(Screen):
         )
 
         btn_sorter = Button(
-            text="Test Sorter (360°)",
+            text="Test Card Puller (360° v2)",
             font_size="20sp",
             size_hint=(1, 0.15),
         )
@@ -530,12 +554,21 @@ class DebugScreen(Screen):
         root.add_widget(btn_dropper)
 
         btn_puller = Button(
-            text="Test Card Puller (360° v2)",
+            text="Test Sorter (360°)",
             font_size="20sp",
             size_hint=(1, 0.15),
         )
         btn_puller.bind(on_press=lambda *_: self.run_test("Card Puller", TEST_PULLER))
         root.add_widget(btn_puller)
+
+        # NEW BUTTON for camera + detection
+        btn_camera = Button(
+            text="Camera test + card detection",
+            font_size="20sp",
+            size_hint=(1, 0.15),
+        )
+        btn_camera.bind(on_press=lambda *_: self.run_camera_test_with_detection())
+        root.add_widget(btn_camera)
 
         self.status = Label(text="", markup=True, size_hint=(1, 0.2))
         root.add_widget(self.status)
@@ -552,6 +585,169 @@ class DebugScreen(Screen):
 
         self.add_widget(root)
 
+    # --- popup + background thread + full-screen preview ---
+
+    def run_camera_test_with_detection(self):
+        """Show 'loading...' popup and start camera+detect in background."""
+        box = BoxLayout(orientation="vertical", padding=20)
+        label = Label(text="Loading...\nPlease wait.", font_size="20sp")
+        box.add_widget(label)
+
+        self._loading_popup = Popup(
+            title="Camera Test",
+            content=box,
+            size_hint=(0.6, 0.3),
+            auto_dismiss=False,
+        )
+
+        self._loading_popup.open()
+        self.status.text = "[color=ffff33]Starting camera test...[/color]"
+
+        # Run heavy work in a separate thread (no UI calls inside!)
+        t = threading.Thread(target=self._camera_test_worker, daemon=True)
+        t.start()
+
+    def _camera_test_worker(self):
+        """Background thread: capture image, run detect, prepare RGB image."""
+        try:
+            print("[DebugScreen] Capturing frame in worker...")
+
+            # --- Load calibrated lens position ---
+            lens_pos = None
+            try:
+                with open(FOCUS_FILE) as f:
+                    cfg_focus = json.load(f)
+                lens_pos = cfg_focus.get("LensPosition", None)
+                print(f"[DebugScreen] Loaded LensPosition from focus.json: {lens_pos}")
+            except Exception as e_focus:
+                print("[DebugScreen] Could not read focus file:", e_focus)
+
+            picam2 = Picamera2()
+
+            # Use a reasonable still resolution; adjust if needed
+            config = picam2.create_still_configuration({"size": (1280, 720)})
+            picam2.configure(config)
+            picam2.start()
+            time.sleep(0.2)  # small warm-up like in your test script
+
+            # --- Apply manual focus using stored LensPosition ---
+            if lens_pos is not None:
+                try:
+                    picam2.set_controls({
+                        "AfMode": controls.AfModeEnum.Manual,
+                        "LensPosition": float(lens_pos),
+                    })
+                    print("[DebugScreen] Manual focus set via controls.AfModeEnum.Manual")
+                except Exception as e_manual:
+                    # Fallback numeric AfMode as in your script
+                    print("[DebugScreen] Manual AF via enum failed, fallback to numeric:", e_manual)
+                    try:
+                        picam2.set_controls({
+                            "AfMode": 0,  # many builds: 0 = Manual
+                            "LensPosition": float(lens_pos),
+                        })
+                        print("[DebugScreen] Manual focus set via AfMode=0")
+                    except Exception as e_fallback:
+                        print("[DebugScreen] Could not set manual focus:", e_fallback)
+            else:
+                print("[DebugScreen] WARNING: No lens_pos loaded, using default focus.")
+
+            # Snap frame quickly (no autofocus delay)
+            frame = picam2.capture_array()  # RGB
+            picam2.stop()
+            picam2.close()
+
+            print("[DebugScreen] Raw frame shape:", frame.shape)
+
+            # Optional: save raw frame for debugging
+            try:
+                out_dir = "/home/lubuharg/Documents/MTG/tests/output"
+                os.makedirs(out_dir, exist_ok=True)
+                raw_path = os.path.join(out_dir, "camera_live_raw.jpg")
+                cv2.imwrite(raw_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                print(f"[DebugScreen] Saved raw frame to {raw_path}")
+            except Exception as e_save:
+                print("[DebugScreen] Could not save debug image:", e_save)
+
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+            # ---- RELAXED CONFIG FOR LIVE CAMERA ----
+            cfg = {
+                "debug": True,
+                "prefer": "contours",
+                "auto_relax": True,
+                "min_abs_area_px": 2000.0,
+                "min_area_ratio": 0.002,
+                "relax": {
+                    "min_abs_area_px": 1000.0,
+                    "min_area_ratio": 0.001,
+                },
+            }
+
+            print("[DebugScreen] Running detect()...")
+            corners = detect(frame_bgr, cfg=cfg, template=None)
+            vis = frame_bgr.copy()
+
+            if corners is not None and hasattr(corners, "pts"):
+                pts = corners.pts.astype(int).reshape(-1, 1, 2)
+                cv2.polylines(vis, [pts], isClosed=True, color=(0, 255, 0), thickness=3)
+                print("[DebugScreen] Card detected. Corners:\n", corners.pts)
+                msg = "Card detected."
+            else:
+                print("[DebugScreen] No card detected.")
+                msg = "No card detected."
+
+            # BGR → RGB for Kivy
+            img_rgb = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
+            h, w, _ = img_rgb.shape
+            print(f"[DebugScreen] Image for preview: {w}x{h}")
+
+            # downscale if too large (avoid texture issues)
+            max_side = 1280
+            if max(h, w) > max_side:
+                scale = max_side / float(max(h, w))
+                new_w = int(w * scale)
+                new_h = int(h * scale)
+                print(f"[DebugScreen] Resizing for preview to {new_w}x{new_h}")
+                img_rgb = cv2.resize(img_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+            # schedule UI update on main thread
+            Clock.schedule_once(
+                lambda dt, img=img_rgb, m=msg: self._camera_test_done(img, m)
+            )
+        except Exception as e:
+            print("[DebugScreen] Error in worker:", repr(e))
+            Clock.schedule_once(lambda dt, err=e: self._camera_test_error(err))
+
+
+    def _camera_test_done(self, img_rgb, msg: str):
+        """Runs on UI thread after worker finishes."""
+        # Close popup
+        if hasattr(self, "_loading_popup") and self._loading_popup:
+            self._loading_popup.dismiss()
+            self._loading_popup = None
+
+        # Update status on Debug screen (for when user comes back)
+        if "No card detected" in msg:
+            self.status.text = "[color=ffcc00]No card detected.[/color]"
+        else:
+            self.status.text = "[color=33ff33]Card detected.[/color]"
+
+        # Send image to CameraPreviewScreen and switch there
+        if self.manager:
+            screen = self.manager.get_screen("camera_preview")
+            screen.set_image_from_numpy(img_rgb)
+            self.manager.current = "camera_preview"
+
+    def _camera_test_error(self, e: Exception):
+        """UI-thread error handler."""
+        if hasattr(self, "_loading_popup") and self._loading_popup:
+            self._loading_popup.dismiss()
+            self._loading_popup = None
+
+        self.status.text = f"[color=ff3333]Error: {e}[/color]"
+        print("[DebugScreen] Camera test error:", repr(e))
+
     def run_test(self, name, script_path):
         if not os.path.exists(script_path):
             self.status.text = f"[color=ff3333]Script not found: {script_path}[/color]"
@@ -559,10 +755,115 @@ class DebugScreen(Screen):
 
         self.status.text = f"Starting {name} test..."
         try:
-            subprocess.Popen(["python3", script_path])
+            subprocess.Popen([sys.executable, script_path])
             self.status.text = f"[color=33ff33]{name} test started.[/color]"
         except Exception as e:
             self.status.text = f"[color=ff3333]Error: {e}[/color]"
+
+
+class CameraPreviewScreen(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(name="camera_preview", **kwargs)
+
+        root = BoxLayout(orientation="vertical")
+
+        # Full-screen image
+        self.image = Image(
+            allow_stretch=True,
+            keep_ratio=True,
+            size_hint=(1, 0.9),
+        )
+        root.add_widget(self.image)
+
+        # Bottom bar with back button
+        bottom = BoxLayout(
+            orientation="horizontal",
+            size_hint=(1, 0.1),
+            padding=10,
+            spacing=10,
+        )
+
+        back_btn = Button(
+            text="Back to Debug",
+            font_size="18sp",
+            size_hint=(0.3, 1),
+        )
+        back_btn.bind(on_press=self._go_back)
+
+        bottom.add_widget(back_btn)
+        root.add_widget(bottom)
+
+        self.add_widget(root)
+
+    def _go_back(self, *_):
+        if self.manager:
+            self.manager.current = "debug"
+
+    def set_image_from_numpy(self, img_rgb):
+        """Receive an RGB numpy image and show it full-screen."""
+        h, w, _ = img_rgb.shape
+        print(f"[CameraPreviewScreen] Showing image {w}x{h}")
+
+        texture = Texture.create(size=(w, h), colorfmt="rgb")
+        texture.blit_buffer(img_rgb.tobytes(), colorfmt="rgb", bufferfmt="ubyte")
+        texture.flip_vertical()
+
+        self.image.texture = texture
+        self.image.texture_size = texture.size
+        self.image.canvas.ask_update()
+
+
+
+class CameraPreviewScreen(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(name="camera_preview", **kwargs)
+
+        root = BoxLayout(orientation="vertical")
+
+        # Full-screen image
+        self.image = Image(
+            allow_stretch=True,
+            keep_ratio=True,
+            size_hint=(1, 0.9),
+        )
+        root.add_widget(self.image)
+
+        # Bottom bar with back button
+        bottom = BoxLayout(
+            orientation="horizontal",
+            size_hint=(1, 0.1),
+            padding=10,
+            spacing=10,
+        )
+
+        back_btn = Button(
+            text="Back to Debug",
+            font_size="18sp",
+            size_hint=(0.3, 1),
+        )
+        back_btn.bind(on_press=self._go_back)
+
+        bottom.add_widget(back_btn)
+        root.add_widget(bottom)
+
+        self.add_widget(root)
+
+    def _go_back(self, *_):
+        if self.manager:
+            self.manager.current = "debug"
+
+    def set_image_from_numpy(self, img_rgb):
+        """Receive an RGB numpy image and show it full-screen."""
+        h, w, _ = img_rgb.shape
+        print(f"[CameraPreviewScreen] Showing image {w}x{h}")
+
+        texture = Texture.create(size=(w, h), colorfmt="rgb")
+        texture.blit_buffer(img_rgb.tobytes(), colorfmt="rgb", bufferfmt="ubyte")
+        texture.flip_vertical()
+
+        self.image.texture = texture
+        self.image.texture_size = texture.size
+        self.image.canvas.ask_update()
 
 
 # ---------------- App ----------------
@@ -585,8 +886,10 @@ class FFMenuApp(App):
         sm.add_widget(SettingsScreen())
         sm.add_widget(WlanSettingsScreen())
         sm.add_widget(DebugScreen())
+        sm.add_widget(CameraPreviewScreen())   # <-- ADD THIS LINE
         sm.current = "splash"
         return sm
+
 
 
 if __name__ == "__main__":

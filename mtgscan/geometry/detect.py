@@ -10,7 +10,7 @@ from mtgscan.core.contracts import Corners
 _DEFAULT_CFG: Dict = {
     # ↓ relaxed to allow smaller/further cards in real photos
     "min_area_ratio": 0.005,           # relative to frame area
-    "min_abs_area_px": 10000000.0,          # NEW: absolute minimum area in pixels
+    "min_abs_area_px": 5268175.0,          # NEW: absolute minimum area in pixels
     "max_area_ratio": 0.95,            # already used by _choose_best_quad
     "aspect_range": (0.40, 3.00),
     "require_portrait": True,    
@@ -29,7 +29,7 @@ _DEFAULT_CFG: Dict = {
     "auto_relax": True,
     "relax": {
         "min_area_ratio": 0.003,      # NEW: relax more than first pass
-        "min_abs_area_px": 10000000.0,      # NEW: relaxed absolute area
+        "min_abs_area_px": 5250000.0,      # NEW: relaxed absolute area
         "aspect_range": (0.40, 3.00),
         "max_quad_epsilon": 0.08,
         "min_solidity": 0.75
