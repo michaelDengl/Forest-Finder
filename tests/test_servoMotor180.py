@@ -18,19 +18,13 @@ def move_to(angle, hold=0.6):
 
 try:
     print("Testing 180° servo on channel 2")
-    print("Centering...")
+    print("Centering at 90°...")
     move_to(90, 1.5)
 
-    print("Sweep 0° → 180° → 0°")
-    for angle in range(0, 181, 30):
-        move_to(angle)
-    for angle in range(180, -1, -30):
-        move_to(angle)
-
-    print("Small oscillation around center")
-    for _ in range(3):
-        for angle in (80, 100, 90):
-            move_to(angle, 0.4)
+    print("Move 90° → 0° → 90°")
+    move_to(0)       # go down to 0°
+    time.sleep(1.0)
+    move_to(90)      # return back to 90°
 
     print("Done.")
 finally:

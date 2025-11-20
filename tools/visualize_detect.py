@@ -7,6 +7,29 @@ import numpy as np
 from mtgscan.geometry.detect import detect, is_plausible_quad, card_likeness_score
 from mtgscan.geometry.rectify import warp_card, compute_target_size
 from mtgscan.core.contracts import Corners
+import sys
+from datetime import datetime
+
+# --- Simple log-to-file wrapper ---
+logfile = f"detect_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+log = open(logfile, "w")
+
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+            s.flush()
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+sys.stdout = Tee(sys.stdout, log)
+sys.stderr = Tee(sys.stderr, log)
+
+print(f"[logging] Writing debug output to: {logfile}")
+
 
 def draw_quad(img, quad, color, thickness=2):
     q = quad.astype(int).reshape(4, 2)
@@ -53,6 +76,39 @@ def main():
     img = cv2.imread(args.image, cv2.IMREAD_COLOR)
     if img is None:
         raise SystemExit(f"Could not read image: {args.image}")
+    
+    # Rotate camera image 90° clockwise because camera is mounted 90° left
+    img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    # After rotation
+    cv2.imwrite("tests/output/DEBUG_01_rotated_input.png", img)
+    print("[dbg] saved DEBUG_01_rotated_input.png", img.shape)
+    # --- Save debug preprocessing images ---
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    cv2.imwrite("tests/output/DEBUG_02_gray.png", gray)
+
+    blur = cv2.GaussianBlur(gray, (5,5), 0)
+    cv2.imwrite("tests/output/DEBUG_03_blur.png", blur)
+
+    canny = cv2.Canny(blur, 75, 200)
+    cv2.imwrite("tests/output/DEBUG_04_canny.png", canny)
+
+    # Binary thresholding tests
+    _, b1 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    cv2.imwrite("tests/output/DEBUG_05_b1.png", b1)
+
+    _, b2 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    cv2.imwrite("tests/output/DEBUG_06_b2.png", b2)
+
+    b3 = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31, 5
+    )
+    cv2.imwrite("tests/output/DEBUG_07_b3.png", b3)
+
+    print("[dbg] saved DEBUG_02..07 preprocessing images")
+
 
     os.makedirs(args.out_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(args.image))[0]
@@ -66,9 +122,14 @@ def main():
             raise SystemExit(f"Could not read template: {args.template}")
 
     cfg = {
-        "prefer": args.prefer,
-        "debug": args.debug,
-    }
+    "prefer": args.prefer,
+    "debug": args.debug,
+    # TEMP: relax filters so we can see what the detector *would* pick
+    "require_portrait": False,      # turn off portrait gate for now
+    "min_area_ratio": 0.0015,       # allow smaller candidates
+    "min_abs_area_px": 8000.0,      # slightly relaxed absolute area
+    }  
+
     if args.min_area_ratio is not None:
         cfg["min_area_ratio"] = args.min_area_ratio
     if args.aspect_min is not None or args.aspect_max is not None:
@@ -82,27 +143,27 @@ def main():
     vis = img.copy()
 
     if isinstance(res, Corners):
-        quad = res.pts
+        quad = res.pts  # get the points first
+
+        # Extra debug info
+        score = card_likeness_score(quad, img, cfg)  # ← pass img, not img.shape
+        h, w = img.shape[:2]
+        area = cv2.contourArea(quad.astype(np.float32))
+        area_ratio = area / float(w * h)
+        print(f"[dbg] likeness_score={score:.3f}, area={area:.1f}, area%={area_ratio:.4f}, h={h}, w={w}")
+
         # visualize detection
-        draw_quad(vis, quad, (0, 255, 0), 3)  # green
+        draw_quad(vis, quad, (0, 255, 0), 3)
         ok = is_plausible_quad(quad, img.shape, cfg)
         print(f"Detection: OK={ok}, quad=\n{quad}")
 
-
-        # optional IoU to GT
-        if args.gt:
-            gt_quad = load_quad(args.gt)
-            draw_quad(vis, gt_quad, (0, 255, 0), 2)  # green
-            iou = iou_quads(gt_quad, quad, img.shape)
-            print(f"IoU vs GT: {iou:.3f}")
-            cv2.putText(vis, f"IoU: {iou:.3f}", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2, cv2.LINE_AA)
-
         # --- Perspective correction
-        dst_w, dst_h = compute_target_size(width=args.rect_w, height=args.rect_h)  # uses MTG aspect when one/both missing
+        dst_w, dst_h = compute_target_size(width=args.rect_w, height=args.rect_h)
         rectified = warp_card(img, quad, width=dst_w, height=dst_h)
         cv2.imwrite(out_rect, rectified)
         print(f"Saved rectified → {out_rect}")
+
+
 
     else:
         print("No Corners detected. Card-like check skipped.")
