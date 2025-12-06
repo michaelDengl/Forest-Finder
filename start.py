@@ -1,61 +1,61 @@
-import time
-import os
+#!/usr/bin/env python3
+from pathlib import Path
 import subprocess
-from datetime import datetime
-from mtg_ocr_engine import set_csv_path, OUTPUT_FOLDER
+import time
 
-# === Pre-Cleaning all directories
-subprocess.run(["python3", "cleanup.py"])
+from detect_card_yolo import detect_and_crop
 
-# === Creating CSV File (one per run)
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-run_csv = os.path.join(
-    OUTPUT_FOLDER,
-    f"magic_report_{datetime.now().strftime('%Y.%m.%d_%H-%M-%S')}.csv"
-)
-set_csv_path(run_csv)
+BASE_DIR = Path("/home/lubuharg/Documents/MTG")
+INPUT_DIR = BASE_DIR / "Input"
 
-target_card = "Forest"  # stop condition
-os.environ["CSV_SUPPRESS_NAME"] = target_card
-found = None
-not_found_images = []
 
-while found != target_card:
-    # === STEP 1: Move card into position ===
-    print("[STEP 1] Moving card into position...")
-    subprocess.run(["python3", "cardFeeder.py"])
-    time.sleep(0)
+def move_card_in():
+    # whatever you currently do, e.g.:
+    subprocess.run(["python", "tests/test_servoMotor360.py"], check=True)
 
-    # === STEP 2: Capture image ===
-    print("[STEP 2] Capturing photo...")
-    from takePicture import capture_mtg_photo
-    image_path = capture_mtg_photo()
 
-    # === STEP 3: OCR + Scryfall lookup ===
-    print("[STEP 3] Processing OCR...")
-    from mtg_ocr_engine import main as scanner_main
-    # Expecting main() to return (matched, reason, csv_path, debug_img_path)
-    matched, reason, csv_path, debug_img_path = scanner_main(image_path)
-    found = matched  # keep loop condition simple
+def drop_card_out():
+    subprocess.run(["python", "tests/test_servoMotor360v2.py"], check=True)
 
-    if matched == "<NOT FOUND>" and debug_img_path:
-        not_found_images.append(debug_img_path)
-        print(f"[INFO] Card not found. Reason: {reason}. Will attach OCR image: {debug_img_path}")
 
-    # === STEP 4: Drop card ===
-    print("[STEP 4] Dropping card...")
-    from dropCard import drop_card
-    drop_card()
-    print("[DONE] Card processed.")
+def take_picture() -> Path:
+    # call your existing camera script
+    subprocess.run(["python", "cameraTests.py"], check=True)
 
-# === STEP 5: Send CSV by Mail ===
-print("[STEP 5] Sending latest CSV file by email...")
+    # after this, cameraTest.py should have saved a new image in Input/
+    files = sorted(
+        list(INPUT_DIR.glob("*.jpg"))
+        + list(INPUT_DIR.glob("*.jpeg"))
+        + list(INPUT_DIR.glob("*.png"))
+    )
+    if not files:
+        raise FileNotFoundError(f"No images found in {INPUT_DIR} after cameraTest.py")
+    return files[-1]
 
-# Expecting send_csv_email.py to accept:
-#   python3 send_csv_email.py <csv_path> <attachment1> <attachment2> ...
-email_cmd = ["python3", "send_csv_email.py", run_csv] + not_found_images
-subprocess.run(email_cmd)
 
-# === STEP 6: Clean up working directories ===
-print("[STEP 6] Cleaning up working folders...")
-subprocess.run(["python3", "cleanup.py"])
+def main():
+    # 1) Move card into position
+    move_card_in()
+
+    # 2) Take picture
+    img_path = take_picture()
+    print(f"[PIPELINE] Captured: {img_path}")
+
+    # 3) Detect + crop with YOLO
+    crop_path = detect_and_crop(img_path, conf=0.02)
+    if crop_path is None:
+        print("[PIPELINE] No card detected, skipping OCR and dropping card.")
+        drop_card_out()
+        return
+
+    print(f"[PIPELINE] Cropped card at: {crop_path}")
+
+    # 4) TODO: plug your warp/OCR here, e.g.
+    # run_ocr_on_image(crop_path)
+
+    # 5) Drop the card out of the machine
+    drop_card_out()
+
+
+if __name__ == "__main__":
+    main()

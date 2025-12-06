@@ -10,35 +10,50 @@ from mtgscan.core.contracts import Corners
 _DEFAULT_CFG: Dict = {
     # ↓ relaxed to allow smaller/further cards in real photos
     "min_area_ratio": 0.005,           # relative to frame area
-    "min_abs_area_px": 5268175.0,          # NEW: absolute minimum area in pixels
+    # Absolute floor on contour area; high enough to ignore inner artwork-only quads
+    "min_abs_area_px": 2800000.0,
     "max_area_ratio": 0.95,            # already used by _choose_best_quad
     "aspect_range": (0.40, 3.00),
     "require_portrait": True,    
     # Expected card size relative to full frame (optional, can be tuned)
     # Example: 0.25 = card ≈ 25% of the image area
-    "target_area_ratio": 0.30,        # set to a float like 0.25 when you know it
+    "target_area_ratio": 0.36,        # tuned to typical framing; avoid overshoot
     "area_ratio_tol": 0.35,           # not used as a hard gate, only for ranking  
     "max_quad_epsilon": 0.08,
     "min_solidity": 0.75,
-    "canny": {"low": 75, "high": 200},
+    "canny": {"low": 40, "high": 160, "clahe": True},
     "blur": {"ksize": 5},
     "feature": {"nfeatures": 2000, "ratio": 0.85, "ransac_thresh": 5.0, "min_inliers": 8},
     "prefer": "contours",
     "debug": False,
+    "dark_border": {"percentile": 20, "blur": 3, "morph": 7, "min_area_ratio": 0.18},
+    "saturation": {"low": 40, "blur": 3, "morph": 7, "min_area_ratio": 0.22},
 
     "auto_relax": True,
     "relax": {
         "min_area_ratio": 0.003,      # NEW: relax more than first pass
-        "min_abs_area_px": 525000.0,      # NEW: relaxed absolute area
+        "min_abs_area_px": 1800000.0,      # NEW: relaxed absolute area
         "aspect_range": (0.40, 3.00),
         "max_quad_epsilon": 0.08,
         "min_solidity": 0.75
     },
 
+    # Fallback (largest portrait quad)
+    "fallback_min_abs_area_px": 2000000.0,
+    "fallback_min_area_ratio": 0.25,
+
     # MTG-likeness helpers
     "card_aspect": 1.395,
     "card_aspect_tol": 0.18,
-    "card_border_min": 0.20,
+    "card_border_min": 0.22,
+    "quad_expand_max_scale": 1.20,    # modest growth headroom
+    "quad_expand_aspect_weight": 0.32,# gentle aspect push
+    "quad_refine_enabled": True,
+    "quad_refine_scale_max": 1.20,    # keep refine close to detected size
+    "local_refine": {"enabled": True, "margin_px": 32},  # widen ROI to catch top/bottom edges
+    "upright_snap": False,            # keep natural tilt; card may not be level in frame
+    "perspective_taper": 0.04,        # gently widen bottom vs top to counter camera tilt
+    "save_last_quad_path": "tests/output/last_quad.json",
 
     # contour housekeeping
     "border_margin_px": 2,
@@ -291,6 +306,227 @@ def _warp_quad(frame: np.ndarray, quad: np.ndarray, out_hw=(1050, 750)) -> np.nd
     M = cv2.getPerspectiveTransform(np.asarray(quad, np.float32), dst)
     return cv2.warpPerspective(frame, M, (Wt, Ht))
 
+def _expand_quad(frame_shape, quad: np.ndarray, cfg: Dict) -> np.ndarray:
+    """Scale quad about its centroid toward target area and card aspect, clipped to frame."""
+    H, W = frame_shape[:2]
+    q = np.asarray(quad, np.float32).reshape(4, 2)
+    center = q.mean(axis=0)
+    area = abs(cv2.contourArea(q)) + 1e-6
+    frame_area = float(H * W)
+    target = cfg.get("target_area_ratio", None)
+    card_aspect = float(cfg.get("card_aspect", 1.395))
+    max_scale = float(cfg.get("quad_expand_max_scale", 1.40))
+    aspect_w = float(cfg.get("quad_expand_aspect_weight", 0.35))
+
+    # Base isotropic scale from target area
+    scale_iso = 1.00
+    if target:
+        desired_area = float(target) * frame_area
+        if desired_area > area:
+            scale_iso = max(scale_iso, math.sqrt(desired_area / area))
+
+    # Anisotropic tweak toward target aspect
+    h, w = _quad_hw(q)
+    cur_aspect = (h / (w + 1e-6)) if w > 1e-6 else card_aspect
+    scale_h = scale_iso
+    scale_w = scale_iso
+    if cur_aspect < card_aspect:  # too wide → grow height more
+        factor = min(max_scale, 1.0 + aspect_w * (card_aspect / (cur_aspect + 1e-6) - 1.0))
+        scale_h *= factor
+    elif cur_aspect > card_aspect:  # too tall → grow width more
+        factor = min(max_scale, 1.0 + aspect_w * (cur_aspect / card_aspect - 1.0))
+        scale_w *= factor
+
+    scale_h = min(max_scale, scale_h)
+    scale_w = min(max_scale, scale_w)
+
+    q[:, 0] = (q[:, 0] - center[0]) * scale_w + center[0]
+    q[:, 1] = (q[:, 1] - center[1]) * scale_h + center[1]
+    q[:, 0] = np.clip(q[:, 0], 0, W - 1)
+    q[:, 1] = np.clip(q[:, 1], 0, H - 1)
+    return q.astype(np.float32)
+
+
+def _refine_quad(frame_shape, quad: np.ndarray, cfg: Dict) -> np.ndarray:
+    """Square up quad using minAreaRect orientation, target aspect and area."""
+    H, W = frame_shape[:2]
+    q = np.asarray(quad, np.float32).reshape(4, 2)
+    area = abs(cv2.contourArea(q)) + 1e-6
+    frame_area = float(H * W)
+    target_area = cfg.get("target_area_ratio", None)
+    card_aspect = float(cfg.get("card_aspect", 1.395))
+    max_scale = float(cfg.get("quad_refine_scale_max", 1.65))
+
+    rect = cv2.minAreaRect(q)
+    center = rect[0]
+    w0, h0 = rect[1]
+    angle = rect[2]
+    if h0 < w0:
+        w0, h0 = h0, w0
+        angle += 90.0
+
+    desired_area = area * 1.02
+    if target_area:
+        desired_area = max(desired_area, float(target_area) * frame_area)
+
+    h_new = math.sqrt(desired_area * card_aspect)
+    w_new = h_new / card_aspect
+    # slight oversize to include full border (keep tiny to avoid blow-up)
+    h_new *= 1.01
+    w_new *= 1.01
+
+    # Cap scaling
+    scale_cap = max_scale * math.sqrt(area / desired_area)
+    h_new = min(h_new, h0 * max_scale)
+    w_new = min(w_new, w0 * max_scale)
+
+    box = cv2.boxPoints((center, (w_new, h_new), angle))
+    box = order_corners_clockwise(box.astype(np.float32))
+    box[:, 0] = np.clip(box[:, 0], 0, W - 1)
+    box[:, 1] = np.clip(box[:, 1], 0, H - 1)
+    return box.astype(np.float32)
+
+
+def _local_edge_refine(frame: np.ndarray, quad: np.ndarray, cfg: Dict) -> np.ndarray:
+    """Align quad to strongest edge contour inside a small ROI around it."""
+    if frame is None or quad is None:
+        return quad
+    H, W = frame.shape[:2]
+    q = np.asarray(quad, np.float32).reshape(4, 2)
+    margin = int(cfg.get("local_refine", {}).get("margin_px", 24))
+    x0 = max(0, int(np.floor(q[:, 0].min() - margin)))
+    x1 = min(W - 1, int(np.ceil(q[:, 0].max() + margin)))
+    y0 = max(0, int(np.floor(q[:, 1].min() - margin)))
+    y1 = min(H - 1, int(np.ceil(q[:, 1].max() + margin)))
+    if x1 <= x0 or y1 <= y0:
+        return quad
+
+    roi = frame[y0:y1+1, x0:x1+1]
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+    edges = cv2.Canny(clahe, 40, 160)
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), 1)
+
+    cnts, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return quad
+
+    # Local pass should not reuse the global min_abs_area_px gate (cards are
+    # typically < 2.8M px in our 12MP frame), otherwise we never snap to the
+    # real border and stay on the inner art. Use a relaxed copy.
+    local_cfg = dict(cfg)
+    local_cfg["min_abs_area_px"] = min(float(cfg.get("min_abs_area_px", 0.0)), 450_000.0)
+    local_cfg["min_area_ratio"] = min(float(cfg.get("min_area_ratio", 0.0)), 0.001)
+
+    # pick largest plausible contour in ROI
+    frame_area = float(H * W)
+    orig_area = float(abs(cv2.contourArea(q))) + 1e-6
+    card_aspect = float(cfg.get("card_aspect", 1.395))
+    best = None
+    best_area = 0.0
+    for c in cnts:
+        if len(c) < 4:
+            continue
+        c_area = float(cv2.contourArea(c))
+        if c_area < best_area:
+            continue
+        # reject contours that are wildly smaller/larger than the current quad
+        ratio = c_area / orig_area
+        if ratio < 0.65 or ratio > 1.35:
+            continue
+        r = cv2.minAreaRect(c)
+        box = cv2.boxPoints(r).astype(np.float32)
+        box[:, 0] += x0
+        box[:, 1] += y0
+        if not is_plausible_quad(box, frame.shape, local_cfg):
+            continue
+        # additional aspect sanity: stay within a reasonable card-like band
+        h_new, w_new = _quad_hw(box)
+        aspect = h_new / (w_new + 1e-6)
+        if aspect < card_aspect * 0.72 or aspect > card_aspect * 1.32:
+            continue
+        best = order_corners_clockwise(box)
+        best_area = c_area
+
+    return best.astype(np.float32) if best is not None else quad
+
+
+def _upright_snap(frame_shape, quad: np.ndarray, cfg: Dict) -> np.ndarray:
+    """Force quad to axis-aligned card aspect box centered at current centroid."""
+    if quad is None:
+        return quad
+    H, W = frame_shape[:2]
+    q = np.asarray(quad, np.float32).reshape(4, 2)
+    center = q.mean(axis=0)
+    area = abs(cv2.contourArea(q)) + 1e-6
+    card_aspect = float(cfg.get("card_aspect", 1.395))
+    frame_area = float(H * W)
+    target = cfg.get("target_area_ratio", None)
+
+    desired_area = area
+    if target:
+        desired_area = max(desired_area, float(target) * frame_area)
+    h_new = math.sqrt(desired_area * card_aspect)
+    w_new = h_new / card_aspect
+
+    # build axis-aligned box
+    half_w = 0.5 * w_new
+    half_h = 0.5 * h_new
+    box = np.array([
+        [center[0] - half_w, center[1] - half_h],
+        [center[0] + half_w, center[1] - half_h],
+        [center[0] + half_w, center[1] + half_h],
+        [center[0] - half_w, center[1] + half_h],
+    ], dtype=np.float32)
+    box[:, 0] = np.clip(box[:, 0], 0, W - 1)
+    box[:, 1] = np.clip(box[:, 1], 0, H - 1)
+    return box
+
+
+def _apply_perspective_taper(frame_shape, quad: np.ndarray, cfg: Dict) -> np.ndarray:
+    """Slightly taper quad horizontally: widen bottom vs top to compensate camera tilt."""
+    t = float(cfg.get("perspective_taper", 0.0))
+    if abs(t) < 1e-4:
+        return quad
+    H, W = frame_shape[:2]
+    q = np.asarray(quad, np.float32).reshape(4, 2)
+    cy = q[:, 1].mean()
+    y_span = max(1.0, q[:, 1].ptp())
+    tapered = q.copy()
+    for i, (x, y) in enumerate(q):
+        # normalize y around center: -0.5 at top, +0.5 at bottom
+        yn = (y - cy) / y_span
+        scale = 1.0 + t * yn
+        tapered[i, 0] = (x - q[:, 0].mean()) * scale + q[:, 0].mean()
+    tapered[:, 0] = np.clip(tapered[:, 0], 0, W - 1)
+    tapered[:, 1] = np.clip(tapered[:, 1], 0, H - 1)
+    return tapered.astype(np.float32)
+
+def _filled_mask_from_edges(edges: np.ndarray, close_ksize: int = 7) -> np.ndarray:
+    """Close edge gaps, flood-fill background, and return filled foreground mask."""
+    ksize = max(3, close_ksize | 1)
+    kernel = np.ones((ksize, ksize), np.uint8)
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=1)
+    closed = cv2.dilate(closed, np.ones((3, 3), np.uint8), 1)
+    h, w = closed.shape
+    filled = closed.copy()
+    cv2.floodFill(filled, np.zeros((h + 2, w + 2), np.uint8), (0, 0), 255)
+    filled_inv = cv2.bitwise_not(filled)
+    return cv2.morphologyEx(filled_inv, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+
+
+def _save_quad_if_needed(quad: np.ndarray, cfg: Dict):
+    path = cfg.get("save_last_quad_path", None)
+    if not path:
+        return
+    try:
+        import json, os
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(quad.reshape(4, 2).tolist(), f)
+    except Exception:
+        pass
+
 def _border_contrast_score(warp: np.ndarray) -> float:
     g = cv2.cvtColor(warp, cv2.COLOR_BGR2GRAY)
     H, W = g.shape
@@ -434,6 +670,56 @@ def _choose_best_quad(cnts, frame: np.ndarray, cfg: Dict) -> Optional[Corners]:
 
     return Corners(pts=best_quad.astype(np.float32))
 
+
+def _largest_portrait_quad(cnts, frame: np.ndarray, cfg: Dict) -> Optional[Corners]:
+    """Fallback: pick the largest portrait-ish quad ignoring MTG border score.
+    Useful when the card outline is clear in edges/binary but MTG contrast is weak."""
+    if not cnts:
+        return None
+    H, W = frame.shape[:2]
+    frame_area = float(H * W)
+    min_abs = float(cfg.get("fallback_min_abs_area_px", 1_200_000.0))
+    min_ratio = float(cfg.get("fallback_min_area_ratio", 0.12))
+    target = cfg.get("target_area_ratio", 0.30)
+    border_margin = int(cfg.get("border_margin_px", 6))
+
+    def touches_border(rect):
+        x, y, w, h = rect
+        return (x <= border_margin or y <= border_margin or
+                x + w >= W - border_margin or y + h >= H - border_margin)
+
+    best = None
+    best_score = -1.0
+    for c in cnts:
+        if len(c) < 4:
+            continue
+        if touches_border(cv2.boundingRect(c)):
+            continue
+        area = float(abs(cv2.contourArea(c)))
+        if area < min_abs:
+            continue
+        area_ratio = area / (frame_area + 1e-6)
+        if area_ratio < min_ratio:
+            continue
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, float(cfg.get("max_quad_epsilon", 0.08)) * peri, True)
+        if len(approx) != 4:
+            approx = cv2.boxPoints(cv2.minAreaRect(c)).astype(np.float32).reshape(-1, 1, 2)
+        pts = order_corners_clockwise(approx.reshape(4, 2).astype(np.float32))
+        h, w = _quad_hw(pts)
+        if h <= w:  # portrait only
+            continue
+        score = area_ratio
+        if target is not None:
+            score -= 0.8 * abs(area_ratio - float(target))
+        # prefer aspect near expected card aspect
+        card_aspect = float(cfg.get("card_aspect", 1.4))
+        score -= 0.5 * abs((h / (w + 1e-6)) - card_aspect)
+        if score > best_score:
+            best_score = score
+            best = pts
+    return Corners(pts=best.astype(np.float32)) if best is not None else None
+
 def is_mtg_card_like(frame: np.ndarray, quad: np.ndarray, cfg: Optional[Dict] = None) -> Tuple[bool, float]:
     """
     Extra orientation-invariant gate for MTG card shape + dark outer border.
@@ -460,6 +746,88 @@ def detect_by_contours(frame: np.ndarray, cfg: Optional[Dict] = None) -> Optiona
     cfg = _merge_cfg(cfg)
     H, W = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    # --- Saturation mask: grab colorful/dark card vs white tray -----------------
+    def _saturation_mask() -> Optional[np.ndarray]:
+        try:
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            s = hsv[:, :, 1]
+        except Exception:
+            return None
+        low = int(cfg["saturation"].get("low", 40))
+        mask = cv2.inRange(s, low, 255)
+        b = int(cfg["saturation"].get("blur", 3))
+        if b > 1:
+            if b % 2 == 0: b += 1
+            mask = cv2.GaussianBlur(mask, (b, b), 0)
+        m = int(cfg["saturation"].get("morph", 7))
+        if m > 1:
+            k = np.ones((m, m), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=1)
+            mask = cv2.dilate(mask, k, iterations=1)
+        return mask
+
+    sat_mask = _saturation_mask()
+    if sat_mask is not None:
+        cnts, _ = cv2.findContours(sat_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        min_ratio_sat = float(cfg["saturation"].get("min_area_ratio", cfg["min_area_ratio"]))
+        frame_area = float(H * W)
+        cnts = [c for c in cnts if cv2.contourArea(c) / (frame_area + 1e-6) >= min_ratio_sat]
+        corners = _choose_best_quad(cnts, frame, cfg)
+        if corners is not None:
+            return corners
+        fallback = _largest_portrait_quad(cnts, frame, cfg)
+        if fallback is not None:
+            return fallback
+
+    # --- Try to isolate the dark outer border before generic binarization ---
+    def _dark_border_mask() -> Optional[np.ndarray]:
+        try:
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            v = hsv[:, :, 2]
+        except Exception:
+            v = gray
+        eq = cv2.equalizeHist(v)
+        p = float(cfg["dark_border"].get("percentile", 30))
+        p = np.clip(p, 5.0, 60.0)
+        thr = int(np.percentile(eq, p))
+        thr = int(np.clip(thr + 2, 8, 220))
+        mask = cv2.inRange(eq, 0, thr)
+        b = int(cfg["dark_border"].get("blur", 3))
+        if b > 1:
+            if b % 2 == 0:
+                b += 1
+            mask = cv2.GaussianBlur(mask, (b, b), 0)
+        m = int(cfg["dark_border"].get("morph", 5))
+        if m > 1:
+            kernel = np.ones((m, m), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+            mask = cv2.dilate(mask, kernel, iterations=1)
+        return mask
+
+    dark_mask = _dark_border_mask()
+    if dark_mask is not None:
+        cnts, _ = cv2.findContours(dark_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        min_ratio_dark = float(cfg["dark_border"].get("min_area_ratio", cfg["min_area_ratio"]))
+        frame_area = float(H * W)
+        border_margin = int(cfg.get("border_margin_px", 6))
+        def _touches_border(rect):
+            x, y, w, h = rect
+            return (x <= border_margin or y <= border_margin or
+                    x + w >= W - border_margin or y + h >= H - border_margin)
+
+        filtered = []
+        for c in cnts:
+            area_ratio = cv2.contourArea(c) / (frame_area + 1e-6)
+            if area_ratio < min_ratio_dark:
+                continue
+            if _touches_border(cv2.boundingRect(c)):
+                continue
+            filtered.append(c)
+        cnts = filtered
+        corners = _choose_best_quad(cnts, frame, cfg)
+        if corners is not None:
+            return corners
 
     # light blur
     k = int(cfg["blur"]["ksize"])
@@ -488,12 +856,32 @@ def detect_by_contours(frame: np.ndarray, cfg: Optional[Dict] = None) -> Optiona
         corners = _choose_best_quad(cnts, frame, cfg)
         if corners is not None:
             return corners
+        fallback = _largest_portrait_quad(cnts, frame, cfg)
+        if fallback is not None:
+            return fallback
 
-    # If no result → try edges
-    edges = cv2.Canny(gray_blur, cfg["canny"]["low"], cfg["canny"]["high"])
+    # If no result → try edges (CLAHE helps separate dark border from bright tray)
+    edge_src = gray_blur
+    if cfg["canny"].get("clahe", False):
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        edge_src = clahe.apply(gray_blur)
+    edges = cv2.Canny(edge_src, cfg["canny"]["low"], cfg["canny"]["high"])
     edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), 1)
     cnts, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    return _choose_best_quad(cnts, frame, cfg)
+    c = _choose_best_quad(cnts, frame, cfg)
+    if c is not None:
+        return c
+    fallback = _largest_portrait_quad(cnts, frame, cfg)
+    if fallback is not None:
+        return fallback
+
+    # Edge-fill fallback: close gaps, fill foreground blobs, then contour again
+    filled = _filled_mask_from_edges(edges, close_ksize=9)
+    cnts, _ = cv2.findContours(filled, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    c = _choose_best_quad(cnts, frame, cfg)
+    if c is not None:
+        return c
+    return _largest_portrait_quad(cnts, frame, cfg)
 
 # ----------------------------------------------------------------------------- #
 # Match clustering (k-means)                                                     #
@@ -838,14 +1226,35 @@ def detect(frame: np.ndarray, cfg: Optional[Dict] = None, template: Optional[np.
     # First pass
     result = _run_once(cfg)
     if result is not None:
-        return result
+        pts = _expand_quad(frame.shape, result.pts, cfg)
+        if cfg.get("quad_refine_enabled", True):
+            pts = _refine_quad(frame.shape, pts, cfg)
+        if cfg.get("local_refine", {}).get("enabled", True):
+            pts = _local_edge_refine(frame, pts, cfg)
+        pts = _apply_perspective_taper(frame.shape, pts, cfg)
+        if cfg.get("upright_snap", False):
+            pts = _upright_snap(frame.shape, pts, cfg)
+        pts = order_corners_clockwise(pts)
+        _save_quad_if_needed(pts, cfg)
+        return Corners(pts=pts)
 
     # Auto-relax
     if cfg.get("auto_relax", True):
         rcfg = _relaxed_cfg(cfg)
         if cfg.get("debug"):
             print("[detect] no result → relaxing")
-        return _run_once(rcfg)
+        res = _run_once(rcfg)
+        if res is not None:
+            pts = _expand_quad(frame.shape, res.pts, rcfg)
+            if rcfg.get("quad_refine_enabled", True):
+                pts = _refine_quad(frame.shape, pts, rcfg)
+            if rcfg.get("local_refine", {}).get("enabled", True):
+                pts = _local_edge_refine(frame, pts, rcfg)
+            pts = _apply_perspective_taper(frame.shape, pts, rcfg)
+            if rcfg.get("upright_snap", False):
+                pts = _upright_snap(frame.shape, pts, rcfg)
+            pts = order_corners_clockwise(pts)
+            _save_quad_if_needed(pts, rcfg)
+            return Corners(pts=pts)
 
     return None
-

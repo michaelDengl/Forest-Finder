@@ -624,8 +624,8 @@ class DebugScreen(Screen):
 
             picam2 = Picamera2()
 
-            # Use a reasonable still resolution; adjust if needed
-            config = picam2.create_still_configuration({"size": (1280, 720)})
+            # Use a 4:3 frame so the portrait preview has more width and less visible crop
+            config = picam2.create_still_configuration({"size": (1640, 1232)})
             picam2.configure(config)
             picam2.start()
             time.sleep(0.2)  # small warm-up like in your test script
@@ -670,6 +670,9 @@ class DebugScreen(Screen):
                 print("[DebugScreen] Could not save debug image:", e_save)
 
             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+            # Camera is mounted 90° left; rotate so preview is upright
+            frame_bgr = cv2.rotate(frame_bgr, cv2.ROTATE_90_CLOCKWISE)
 
             # ---- RELAXED CONFIG FOR LIVE CAMERA ----
             cfg = {

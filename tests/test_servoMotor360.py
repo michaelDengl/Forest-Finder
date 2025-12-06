@@ -9,7 +9,7 @@ s = kit.continuous_servo[CHANNEL]
 try:
     print("Forward 0.7s")
     s.throttle = -0.1
-    time.sleep(0.8)
+    time.sleep(0.7)
 
     print("Stop 1s")
     s.throttle = 0.1
@@ -17,7 +17,7 @@ try:
 
     print("Reverse .7s")
     s.throttle = 0.3
-    time.sleep(0.7)
+    time.sleep(0.6)
 
     print("Done.")
 finally:

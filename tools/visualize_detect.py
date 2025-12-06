@@ -122,13 +122,10 @@ def main():
             raise SystemExit(f"Could not read template: {args.template}")
 
     cfg = {
-    "prefer": args.prefer,
-    "debug": args.debug,
-    # TEMP: relax filters so we can see what the detector *would* pick
-    "require_portrait": False,      # turn off portrait gate for now
-    "min_area_ratio": 0.0015,       # allow smaller candidates
-    #"min_abs_area_px": 8000.0,      # slightly relaxed absolute area
-    }  
+        "prefer": args.prefer,
+        "debug": args.debug,
+        "require_portrait": True,
+    }
 
     if args.min_area_ratio is not None:
         cfg["min_area_ratio"] = args.min_area_ratio
