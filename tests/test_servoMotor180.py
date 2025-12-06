@@ -19,7 +19,7 @@ def move_to(angle, hold=0.6):
 try:
     print("Testing 180° servo on channel 2")
     print("Centering at 90°...")
-    move_to(90, 1.5)
+    move_to(90, 0)
 
     print("Move 90° → 0° → 90°")
     move_to(0)       # go down to 0°

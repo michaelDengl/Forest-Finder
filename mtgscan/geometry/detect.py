@@ -29,7 +29,7 @@ _DEFAULT_CFG: Dict = {
     "auto_relax": True,
     "relax": {
         "min_area_ratio": 0.003,      # NEW: relax more than first pass
-        "min_abs_area_px": 5250000.0,      # NEW: relaxed absolute area
+        "min_abs_area_px": 525000.0,      # NEW: relaxed absolute area
         "aspect_range": (0.40, 3.00),
         "max_quad_epsilon": 0.08,
         "min_solidity": 0.75

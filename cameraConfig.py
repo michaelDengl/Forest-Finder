@@ -2,7 +2,7 @@ from picamera2 import Picamera2
 from datetime import datetime
 import time, json, os
 
-FOCUS_FILE = "/home/lubuharg/Documents/MTG/Config/focus.json"
+FOCUS_FILE = "/home/lubuharg/Documents/MTG/config/focus.json"
 os.makedirs(os.path.dirname(FOCUS_FILE), exist_ok=True)
 
 picam2 = Picamera2()
