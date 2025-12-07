@@ -44,7 +44,52 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent  # /home/.../Documents/MTG
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from mtgscan.geometry.detect import detect
+YOLO_MODEL_PATH = PROJECT_ROOT / "models" / "card_detector.pt"
+START_SCRIPT = PROJECT_ROOT / "start.py"
+
+# Prefer a known venv unless the user already set an override.
+_DEFAULT_PYTHON = Path.home() / "labelimg-venv" / "bin" / "python"
+if not os.environ.get("MTG_PYTHON") and _DEFAULT_PYTHON.exists():
+    os.environ["MTG_PYTHON"] = str(_DEFAULT_PYTHON)
+
+def _maybe_add_venv_site_packages():
+    """
+    If the app was launched outside a virtualenv, try to add a venv's site-packages
+    to sys.path so imports like ultralytics can be resolved. Preference order:
+    1) MTG_VENV env var, 2) VIRTUAL_ENV, 3) .venv under project root,
+    4) ~/labelimg-venv (current known env on device).
+    """
+    py_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    candidates = []
+
+    for env_var in ("MTG_VENV", "VIRTUAL_ENV"):
+        env_val = os.environ.get(env_var)
+        if env_val:
+            candidates.append(Path(env_val))
+
+    candidates.append(PROJECT_ROOT / ".venv")
+    candidates.append(Path.home() / "labelimg-venv")
+
+    for root in candidates:
+        site_dir = root / "lib" / py_ver / "site-packages"
+        if site_dir.is_dir() and str(site_dir) not in sys.path:
+            sys.path.insert(0, str(site_dir))
+            print(f"[DebugScreen] Added venv site-packages: {site_dir}")
+            return site_dir
+
+    return None
+
+
+ADDED_VENV_SITE = _maybe_add_venv_site_packages()
+
+# YOLO import is optional; keep UI usable even if the dependency is missing.
+try:
+    from detect_card_yolo import get_model  # type: ignore
+    YOLO_AVAILABLE = True
+except Exception as e:
+    print("[DebugScreen] YOLO import failed:", repr(e))
+    get_model = None
+    YOLO_AVAILABLE = False
 
 
 # --------- CONSTANTS / PATHS ---------
@@ -170,6 +215,12 @@ class SplashScreen(Screen):
 class Menu(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(orientation="vertical", spacing=16, padding=16, **kwargs)
+        self.scan_thread = None
+        self._scan_proc = None
+        self._scan_cancelled = False
+        self._preview_popup = None
+        self._scan_popup_mode = None
+        self._scan_preview_img = None
 
         self.add_widget(
             Label(
@@ -190,7 +241,14 @@ class Menu(BoxLayout):
         return Button(text=text, font_size="22sp", size_hint=(1, 0.15), on_press=cb)
 
     def on_start_scan(self, *_):
-        self._flash("Starting scan...")
+        # avoid concurrent scans
+        if self.scan_thread and self.scan_thread.is_alive():
+            self._flash("Scan already running...")
+            return
+        self._scan_cancelled = False
+        self._show_scan_popup("Starting scan...")
+        self.scan_thread = threading.Thread(target=self._run_scan, daemon=True)
+        self.scan_thread.start()
 
     def on_show_last(self, *_):
         self._flash("Opening last result...")
@@ -214,6 +272,213 @@ class Menu(BoxLayout):
 
     def _clear(self):
         self.status.text = ""
+
+    # --- Scan helpers ---
+    def _show_scan_popup(self, message: str):
+        box = BoxLayout(orientation="vertical", padding=20, spacing=10)
+        label = Label(text=message, font_size="20sp", halign="center", valign="middle")
+        label.bind(size=lambda inst, *_: setattr(inst, "text_size", inst.size))
+        box.add_widget(label)
+
+        cancel_btn = Button(
+            text="Cancel scanning",
+            size_hint=(1, 0.35),
+            font_size="18sp",
+        )
+        cancel_btn.bind(on_press=self._cancel_scan)
+        box.add_widget(cancel_btn)
+
+        self._scan_popup_label = label
+        self._scan_popup_cancel_btn = cancel_btn
+        self._scan_popup = Popup(
+            title="Scanning",
+            content=box,
+            size_hint=(0.6, 0.3),
+            auto_dismiss=False,
+        )
+        self._scan_popup_mode = "scan"
+        self._scan_popup.open()
+
+    def _update_scan_popup(self, message: str):
+        label = getattr(self, "_scan_popup_label", None)
+        if label is not None:
+            label.text = message
+
+    def _cancel_scan(self, *_):
+        # Disable the button to avoid repeated clicks.
+        btn = getattr(self, "_scan_popup_cancel_btn", None)
+        if btn is not None:
+            btn.disabled = True
+        self._scan_cancelled = True
+        self._update_scan_popup("Cancelling scan...")
+        proc = getattr(self, "_scan_proc", None)
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+                print("[Menu] Sent terminate to scanning process.")
+            except Exception as e:
+                print("[Menu] Failed to terminate scan process:", e)
+
+    def _dismiss_scan_popup(self):
+        popup = getattr(self, "_scan_popup", None)
+        if popup is not None:
+            popup.dismiss()
+            self._scan_popup = None
+            self._scan_popup_label = None
+            self._scan_popup_cancel_btn = None
+            self._scan_popup_mode = None
+            self._scan_preview_img = None
+
+    def _python_cmd(self) -> str:
+        """
+        Choose a Python interpreter for running start.py.
+        Preference: MTG_PYTHON env, project .venv, ~/labelimg-venv, current interpreter.
+        """
+        candidates = []
+        env_val = os.environ.get("MTG_PYTHON")
+        if env_val:
+            candidates.append(Path(env_val))
+        candidates.append(PROJECT_ROOT / ".venv" / "bin" / "python")
+        candidates.append(Path.home() / "labelimg-venv" / "bin" / "python")
+        candidates.append(Path(sys.executable))
+        for c in candidates:
+            if c and Path(c).exists():
+                print(f"[Menu] Using Python interpreter: {c}")
+                return str(c)
+        print("[Menu] Falling back to current interpreter for scan.")
+        return sys.executable
+
+    def _run_scan(self):
+        cmd = [self._python_cmd(), str(START_SCRIPT)]
+        Clock.schedule_once(lambda *_: self._update_scan_popup("Running scan..."), 0)
+        proc = None
+        last_line = ""
+        ret = -1
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            self._scan_proc = proc
+            if proc.stdout:
+                for raw in proc.stdout:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    last_line = line
+                    if line.startswith("[PREVIEW]"):
+                        payload = line[len("[PREVIEW]"):].strip()
+                        if not payload:
+                            continue
+                        parts = payload.split()
+                        path = parts[0]
+                        note = " ".join(parts[1:]).strip()
+                        Clock.schedule_once(lambda _dt, _p=path, _n=note: self._show_preview_popup(_p, note=_n), 0)
+                    elif line.startswith("[PIPELINE]"):
+                        Clock.schedule_once(lambda _dt, _m=line: self._update_scan_popup(_m[:120]), 0)
+            ret = proc.wait()
+        except Exception as e:
+            last_line = f"Scan error: {e}"
+            ret = -1
+        finally:
+            self._scan_proc = None
+            if proc and proc.stdout:
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+
+        if self._scan_cancelled:
+            msg = "Scan cancelled."
+        elif ret == 0:
+            msg = "Scan done."
+            if last_line:
+                msg += f" {last_line[:120]}"
+        else:
+            msg = f"Scan failed (code {ret})."
+            if last_line:
+                msg += f" {last_line[:120]}"
+
+        def _finish(*_):
+            self._dismiss_scan_popup()
+            self._flash(msg)
+            self.scan_thread = None
+
+        Clock.schedule_once(_finish, 0)
+
+    def _show_preview_popup(self, img_path: str, note: str = ""):
+        """
+        Show the warped/ocr image for a few seconds when the pipeline
+        reports a new preview path.
+        """
+        try:
+            path = Path(img_path)
+        except Exception:
+            return
+
+        if not path.exists():
+            print(f"[Menu] Preview image not found: {img_path}")
+            return
+
+        # If we already have a preview popup, reuse it by swapping the image/note.
+        if getattr(self, "_scan_popup_mode", None) == "preview" and getattr(self, "_scan_popup", None):
+            try:
+                if getattr(self, "_scan_preview_img", None):
+                    self._scan_preview_img.source = str(path)
+                    self._scan_preview_img.reload()
+                if getattr(self, "_scan_popup_label", None):
+                    self._scan_popup_label.text = note or "Detected card"
+                return
+            except Exception:
+                # Fall through to recreating the popup.
+                pass
+
+        # Otherwise close any lingering scanning popup before showing the preview.
+        self._dismiss_scan_popup()
+
+        box = BoxLayout(orientation="vertical", padding=10, spacing=10)
+        img = Image(
+            source=str(path),
+            allow_stretch=True,
+            keep_ratio=True,
+            size_hint=(1, 0.7),
+        )
+        box.add_widget(img)
+
+        note_label = Label(
+            text=note or "Detected card",
+            size_hint=(1, 0.1),
+            halign="center",
+            valign="middle",
+        )
+        note_label.bind(size=lambda inst, *_: setattr(inst, "text_size", inst.size))
+        box.add_widget(note_label)
+
+        cancel_btn = Button(
+            text="Cancel",
+            size_hint=(1, 0.15),
+            font_size="18sp",
+        )
+        cancel_btn.bind(on_press=self._cancel_scan)
+        box.add_widget(cancel_btn)
+
+        popup = Popup(
+            title="Detected card",
+            content=box,
+            size_hint=(0.9, 0.9),
+            auto_dismiss=False,
+        )
+
+        self._scan_popup = popup
+        self._scan_popup_label = note_label
+        self._scan_popup_cancel_btn = cancel_btn
+        self._scan_popup_mode = "preview"
+        self._scan_preview_img = img
+        popup.open()
 
 
 class MenuScreen(Screen):
@@ -570,6 +835,14 @@ class DebugScreen(Screen):
         btn_camera.bind(on_press=lambda *_: self.run_camera_test_with_detection())
         root.add_widget(btn_camera)
 
+        yolo_text = (
+            f"[color=33ff33]YOLO ready ({YOLO_MODEL_PATH.name})[/color]"
+            if YOLO_AVAILABLE and YOLO_MODEL_PATH.exists()
+            else "[color=ffcc00]YOLO missing – install ultralytics + place model at models/card_detector.pt[/color]"
+        )
+        self.yolo_status = Label(text=yolo_text, markup=True, size_hint=(1, 0.1))
+        root.add_widget(self.yolo_status)
+
         self.status = Label(text="", markup=True, size_hint=(1, 0.2))
         root.add_widget(self.status)
 
@@ -608,7 +881,7 @@ class DebugScreen(Screen):
         t.start()
 
     def _camera_test_worker(self):
-        """Background thread: capture image, run detect, prepare RGB image."""
+        """Background thread: capture image, run detect + YOLO, prepare RGB image."""
         try:
             print("[DebugScreen] Capturing frame in worker...")
 
@@ -671,37 +944,29 @@ class DebugScreen(Screen):
 
             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-            # Camera is mounted 90° left; rotate so preview is upright
-            frame_bgr = cv2.rotate(frame_bgr, cv2.ROTATE_90_CLOCKWISE)
+            # Keep an upright version only for fallback preview; YOLO runs on the original.
+            frame_bgr_upright = cv2.rotate(frame_bgr, cv2.ROTATE_90_CLOCKWISE)
 
-            # ---- RELAXED CONFIG FOR LIVE CAMERA ----
-            cfg = {
-                "debug": True,
-                "prefer": "contours",
-                "auto_relax": True,
-                "min_abs_area_px": 2000.0,
-                "min_area_ratio": 0.002,
-                "relax": {
-                    "min_abs_area_px": 1000.0,
-                    "min_area_ratio": 0.001,
-                },
-            }
-
-            print("[DebugScreen] Running detect()...")
-            corners = detect(frame_bgr, cfg=cfg, template=None)
-            vis = frame_bgr.copy()
-
-            if corners is not None and hasattr(corners, "pts"):
-                pts = corners.pts.astype(int).reshape(-1, 1, 2)
-                cv2.polylines(vis, [pts], isClosed=True, color=(0, 255, 0), thickness=3)
-                print("[DebugScreen] Card detected. Corners:\n", corners.pts)
-                msg = "Card detected."
+            # --- YOLO detection for cropped card preview (no contour detect) ---
+            crop_rgb = None
+            if YOLO_AVAILABLE:
+                try:
+                    crop_rgb, yolo_status = self._apply_yolo(frame_bgr)
+                    msg = yolo_status
+                except Exception as e_yolo:
+                    print("[DebugScreen] YOLO error:", repr(e_yolo))
+                    msg = f"YOLO error: {e_yolo}"
             else:
-                print("[DebugScreen] No card detected.")
-                msg = "No card detected."
+                msg = "YOLO unavailable"
 
-            # BGR → RGB for Kivy
-            img_rgb = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
+            # Use the cropped card for the preview if we have it; otherwise show the full frame.
+            if crop_rgb is not None:
+                # Rotate to match the upright preview orientation.
+                crop_rgb = cv2.rotate(crop_rgb, cv2.ROTATE_90_CLOCKWISE)
+                img_rgb = crop_rgb
+            else:
+                img_rgb = cv2.cvtColor(frame_bgr_upright, cv2.COLOR_BGR2RGB)
+
             h, w, _ = img_rgb.shape
             print(f"[DebugScreen] Image for preview: {w}x{h}")
 
@@ -716,14 +981,43 @@ class DebugScreen(Screen):
 
             # schedule UI update on main thread
             Clock.schedule_once(
-                lambda dt, img=img_rgb, m=msg: self._camera_test_done(img, m)
+                lambda dt, img=img_rgb, m=msg, crop=crop_rgb: self._camera_test_done(img, m, crop)
             )
         except Exception as e:
             print("[DebugScreen] Error in worker:", repr(e))
             Clock.schedule_once(lambda dt, err=e: self._camera_test_error(err))
 
+    def _apply_yolo(self, frame_bgr):
+        """Run YOLO on the raw frame and return the cropped card (RGB) plus status."""
+        if not YOLO_AVAILABLE or get_model is None:
+            return None, "YOLO unavailable"
+        model = get_model()
+        results = model(frame_bgr, conf=0.02)[0]
+        if not results.boxes:
+            print("[DebugScreen][YOLO] No detections.")
+            return None, "YOLO: no card detected"
 
-    def _camera_test_done(self, img_rgb, msg: str):
+        boxes = results.boxes
+        best_idx = boxes.conf.argmax().item()
+        box = boxes[best_idx]
+        best_conf = float(box.conf[0])
+        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+
+        H, W, _ = frame_bgr.shape
+        x1 = max(0, min(x1, W - 1))
+        x2 = max(0, min(x2, W - 1))
+        y1 = max(0, min(y1, H - 1))
+        y2 = max(0, min(y2, H - 1))
+        if x2 <= x1 or y2 <= y1:
+            print("[DebugScreen][YOLO] Invalid crop coords:", (x1, y1, x2, y2))
+            return None, "YOLO: bad box"
+
+        crop_bgr = frame_bgr[y1:y2, x1:x2]
+        crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+        print(f"[DebugScreen][YOLO] Crop size: {crop_rgb.shape[1]}x{crop_rgb.shape[0]}, conf={best_conf:.3f}")
+        return crop_rgb, f"YOLO: card conf={best_conf:.2f}"
+
+    def _camera_test_done(self, img_rgb, msg: str, crop_rgb=None):
         """Runs on UI thread after worker finishes."""
         # Close popup
         if hasattr(self, "_loading_popup") and self._loading_popup:
@@ -731,7 +1025,7 @@ class DebugScreen(Screen):
             self._loading_popup = None
 
         # Update status on Debug screen (for when user comes back)
-        if "No card detected" in msg:
+        if crop_rgb is None:
             self.status.text = "[color=ffcc00]No card detected.[/color]"
         else:
             self.status.text = "[color=33ff33]Card detected.[/color]"
@@ -739,7 +1033,7 @@ class DebugScreen(Screen):
         # Send image to CameraPreviewScreen and switch there
         if self.manager:
             screen = self.manager.get_screen("camera_preview")
-            screen.set_image_from_numpy(img_rgb)
+            screen.set_image_from_numpy(img_rgb, crop_rgb=crop_rgb, msg=msg)
             self.manager.current = "camera_preview"
 
     def _camera_test_error(self, e: Exception):
@@ -768,15 +1062,27 @@ class CameraPreviewScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(name="camera_preview", **kwargs)
 
-        root = BoxLayout(orientation="vertical")
+        root = BoxLayout(orientation="vertical", padding=10, spacing=10)
 
-        # Full-screen image
+        # Keep the status label compact so the preview can dominate the screen.
+        self.status_label = Label(
+            text="",
+            markup=True,
+            size_hint=(1, None),
+            height=40,
+        )
+        root.add_widget(self.status_label)
+
+        # Main preview area: show only the final image.
+        body = BoxLayout(orientation="vertical", size_hint=(1, 0.85), spacing=10)
+
         self.image = Image(
             allow_stretch=True,
             keep_ratio=True,
-            size_hint=(1, 0.9),
+            size_hint=(1, 1),
         )
-        root.add_widget(self.image)
+        body.add_widget(self.image)
+        root.add_widget(body)
 
         # Bottom bar with back button
         bottom = BoxLayout(
@@ -802,71 +1108,24 @@ class CameraPreviewScreen(Screen):
         if self.manager:
             self.manager.current = "debug"
 
-    def set_image_from_numpy(self, img_rgb):
-        """Receive an RGB numpy image and show it full-screen."""
+    def _apply_texture(self, widget, img_rgb):
         h, w, _ = img_rgb.shape
-        print(f"[CameraPreviewScreen] Showing image {w}x{h}")
-
         texture = Texture.create(size=(w, h), colorfmt="rgb")
         texture.blit_buffer(img_rgb.tobytes(), colorfmt="rgb", bufferfmt="ubyte")
         texture.flip_vertical()
+        widget.texture = texture
+        widget.texture_size = texture.size
+        widget.canvas.ask_update()
 
-        self.image.texture = texture
-        self.image.texture_size = texture.size
-        self.image.canvas.ask_update()
+    def set_image_from_numpy(self, img_rgb, *, crop_rgb=None, msg: str = ""):
+        """Receive an RGB numpy image and show only the final result."""
+        display = crop_rgb if crop_rgb is not None else img_rgb
+        h, w, _ = display.shape
+        suffix = " (cropped)" if crop_rgb is not None else ""
+        print(f"[CameraPreviewScreen] Showing image {w}x{h}{suffix}")
+        self._apply_texture(self.image, display)
 
-
-
-class CameraPreviewScreen(Screen):
-    def __init__(self, **kwargs):
-        super().__init__(name="camera_preview", **kwargs)
-
-        root = BoxLayout(orientation="vertical")
-
-        # Full-screen image
-        self.image = Image(
-            allow_stretch=True,
-            keep_ratio=True,
-            size_hint=(1, 0.9),
-        )
-        root.add_widget(self.image)
-
-        # Bottom bar with back button
-        bottom = BoxLayout(
-            orientation="horizontal",
-            size_hint=(1, 0.1),
-            padding=10,
-            spacing=10,
-        )
-
-        back_btn = Button(
-            text="Back to Debug",
-            font_size="18sp",
-            size_hint=(0.3, 1),
-        )
-        back_btn.bind(on_press=self._go_back)
-
-        bottom.add_widget(back_btn)
-        root.add_widget(bottom)
-
-        self.add_widget(root)
-
-    def _go_back(self, *_):
-        if self.manager:
-            self.manager.current = "debug"
-
-    def set_image_from_numpy(self, img_rgb):
-        """Receive an RGB numpy image and show it full-screen."""
-        h, w, _ = img_rgb.shape
-        print(f"[CameraPreviewScreen] Showing image {w}x{h}")
-
-        texture = Texture.create(size=(w, h), colorfmt="rgb")
-        texture.blit_buffer(img_rgb.tobytes(), colorfmt="rgb", bufferfmt="ubyte")
-        texture.flip_vertical()
-
-        self.image.texture = texture
-        self.image.texture_size = texture.size
-        self.image.canvas.ask_update()
+        self.status_label.text = msg
 
 
 # ---------------- App ----------------

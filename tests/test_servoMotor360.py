@@ -15,7 +15,7 @@ try:
     s.throttle = 0.1
     time.sleep(0.1)
 
-    print("Reverse .7s")
+    print("Reverse .6s")
     s.throttle = 0.3
     time.sleep(0.6)
 

@@ -491,7 +491,8 @@ def _apply_perspective_taper(frame_shape, quad: np.ndarray, cfg: Dict) -> np.nda
     H, W = frame_shape[:2]
     q = np.asarray(quad, np.float32).reshape(4, 2)
     cy = q[:, 1].mean()
-    y_span = max(1.0, q[:, 1].ptp())
+    # NumPy 2.0 removed ndarray.ptp; use np.ptp for compatibility
+    y_span = max(1.0, float(np.ptp(q[:, 1])))
     tapered = q.copy()
     for i, (x, y) in enumerate(q):
         # normalize y around center: -0.5 at top, +0.5 at bottom

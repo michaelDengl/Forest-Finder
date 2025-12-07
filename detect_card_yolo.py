@@ -3,6 +3,7 @@ import cv2
 from pathlib import Path
 import time
 import sys
+from typing import Optional, Tuple
 
 BASE_DIR = Path("/home/lubuharg/Documents/MTG")
 INPUT_DIR = BASE_DIR / "Input"
@@ -41,10 +42,16 @@ def get_latest_image() -> Path:
 def detect_and_crop(
     image_path: str | Path | None = None,
     conf: float = 0.02,
-) -> Path | None:
+    expand: float = 0.0,
+) -> Tuple[Path | None, Optional[Tuple[int, int, int, int]], Optional[float]]:
     """
     Run YOLO on the given image (or latest from Input if None),
-    crop the best card, save it in Detected, and return the crop path.
+    crop the best card (optionally expanding the box), save it in Detected,
+    and return (crop path, bbox, best_conf). Returns (None, None, None) if no
+    card is detected.
+
+    expand: fractional padding to apply to each side of the box.
+            e.g. 0.08 adds ~8% of box size on all sides.
     Returns None if no card is detected.
     """
     model = get_model()
@@ -68,7 +75,7 @@ def detect_and_crop(
 
     if not results.boxes:
         print("[YOLO] No card detected.")
-        return None
+        return None, None, None
 
     boxes = results.boxes
     best_idx = boxes.conf.argmax().item()
@@ -76,17 +83,26 @@ def detect_and_crop(
     best_conf = float(box.conf[0])
     print(f"[YOLO] Best box idx={best_idx}, conf={best_conf:.4f}")
 
-    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(float)
+
+    if expand > 0:
+        pad_x = (x2 - x1) * float(expand)
+        pad_y = (y2 - y1) * float(expand)
+        x1 -= pad_x
+        x2 += pad_x
+        y1 -= pad_y
+        y2 += pad_y
+        print(f"[YOLO] Expanded crop by {expand:.3f} → ({x1:.1f}, {y1:.1f})-({x2:.1f}, {y2:.1f})")
 
     # Clamp to image borders
-    x1 = max(0, min(x1, w - 1))
-    x2 = max(0, min(x2, w))
-    y1 = max(0, min(y1, h - 1))
-    y2 = max(0, min(y2, h))
+    x1 = int(max(0, min(x1, w - 1)))
+    x2 = int(max(0, min(x2, w)))
+    y1 = int(max(0, min(y1, h - 1)))
+    y2 = int(max(0, min(y2, h)))
 
     if x2 <= x1 or y2 <= y1:
         print(f"[YOLO] Invalid crop coords: {(x1, y1, x2, y2)}")
-        return None
+        return None, None, None
 
     crop = img[y1:y2, x1:x2]
 
@@ -95,16 +111,16 @@ def detect_and_crop(
     cv2.imwrite(str(out_path), crop)
 
     print(f"[YOLO] Saved cropped card to {out_path}")
-    return out_path
+    return out_path, (x1, y1, x2, y2), best_conf
 
 
 def main():
     try:
-        crop_path = detect_and_crop()
+        crop_path, bbox, best_conf = detect_and_crop()
         if crop_path is None:
             print("[YOLO] Done, but no crop created.")
         else:
-            print(f"[YOLO] Done, crop at: {crop_path}")
+            print(f"[YOLO] Done, crop at: {crop_path}, bbox={bbox}, conf={best_conf}")
     except Exception as e:
         print(f"[YOLO] ERROR: {e}", file=sys.stderr)
         sys.exit(1)
