@@ -10,6 +10,9 @@ INPUT_DIR = BASE_DIR / "Input"
 OUTPUT_DIR = BASE_DIR / "Detected"
 MODEL_PATH = BASE_DIR / "models" / "card_detector.pt"
 
+EXPAND_X_FRAC = 0.05   # e.g. 5 % – tweak this
+EXPAND_Y_FRAC = 0.05   # e.g. 2 % – tweak this
+
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 _model_instance: YOLO | None = None
@@ -85,14 +88,20 @@ def detect_and_crop(
 
     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(float)
 
-    if expand > 0:
-        pad_x = (x2 - x1) * float(expand)
-        pad_y = (y2 - y1) * float(expand)
-        x1 -= pad_x
-        x2 += pad_x
-        y1 -= pad_y
-        y2 += pad_y
-        print(f"[YOLO] Expanded crop by {expand:.3f} → ({x1:.1f}, {y1:.1f})-({x2:.1f}, {y2:.1f})")
+    # Always use the hardcoded expansion factors at the top.
+    pad_x = (x2 - x1) * EXPAND_X_FRAC
+    pad_y = (y2 - y1) * EXPAND_Y_FRAC
+
+    x1 -= pad_x
+    x2 += pad_x
+    y1 -= pad_y
+    y2 += pad_y
+
+    print(
+        f"[YOLO] Expanded crop by x={EXPAND_X_FRAC:.3f}, y={EXPAND_Y_FRAC:.3f} "
+        f"→ ({x1:.1f}, {y1:.1f})-({x2:.1f}, {y2:.1f})"
+    )
+
 
     # Clamp to image borders
     x1 = int(max(0, min(x1, w - 1)))

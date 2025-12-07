@@ -401,7 +401,7 @@ def _process_single_card(conf_thresh: float = DEFAULT_CONF_THRESH) -> ScanResult
     _check_cancel()
 
     # Slightly expand YOLO crop so warping sees the full card including borders
-    crop_path, bbox, best_conf = detect_and_crop(img_path, conf=0.02, expand=0.12)
+    crop_path, bbox, best_conf = detect_and_crop(img_path, conf=0.02)
     _check_cancel()
 
     conf_val = best_conf if best_conf is not None else 0.0
