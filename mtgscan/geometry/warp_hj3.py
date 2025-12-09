@@ -32,6 +32,10 @@ EDGE_MAX_INNER_FRAC = 0.08   # search up to 45% of width from each side
 HOUGH_MIN_AREA_RATIO = 0.70   # reject if Hough area < 90% of 1D bbox area
 HOUGH_MAX_AREA_RATIO = 1.25   # reject if Hough area > 125% of 1D bbox area
 
+HOUGH_MAX_SIDE_X_OFFSET_FRAC = 0.25  # how far Hough lines may deviate from 1D bbox (25% of size)
+HOUGH_MAX_SIDE_Y_OFFSET_FRAC = 0.06
+
+
 # ---------------------------------------------------------------------------
 # 1) Point ordering + four-point perspective transform (from hj3yoo)
 # ---------------------------------------------------------------------------
@@ -400,6 +404,10 @@ def refine_corners_hough(
     xR_roi = x_right  - x0
     yT_roi = y_top    - y0
     yB_roi = y_bottom - y0
+    
+    # midpoints of the bbox in ROI coords (for left/right & top/bottom splitting)
+    mid_x = 0.5 * (xL_roi + xR_roi)
+    mid_y = 0.5 * (yT_roi + yB_roi)
 
     print(
         f"[Hough] ROI size: {rw}x{rh}, "
@@ -436,13 +444,14 @@ def refine_corners_hough(
 
     # Hough lines
     lines = cv2.HoughLinesP(
-        edges,
-        rho=1,
-        theta=np.pi / 180,
-        threshold=50,
-        minLineLength=max(rh, rw) // 5,
-        maxLineGap=40,
-    )
+    edges,
+    rho=1,
+    theta=np.pi / 180,
+    threshold=40,                       # a bit easier to trigger
+    minLineLength=max(rh, rw) // 8,     # shorter lines are allowed
+    maxLineGap=int(0.10 * max(rh, rw)), # allow bigger gaps to be merged
+)
+
     if lines is None:
         print("[Hough] no lines found")
         return None
@@ -502,8 +511,8 @@ def refine_corners_hough(
         return (float(line[1]) + float(line[3])) * 0.5
 
     # maximum allowed distances of the chosen line from the bbox side
-    max_dx = max(20.0, 0.15 * rw)  # 15% of width or 20 px
-    max_dy = max(20.0, 0.15 * rh)  # 15% of height or 20 px
+    max_dx = max(20.0, HOUGH_MAX_SIDE_X_OFFSET_FRAC * rw)
+    max_dy = max(20.0, HOUGH_MAX_SIDE_Y_OFFSET_FRAC * rh)
 
     # choose verticals for left/right (closest center x to each side)
     best_left = None
@@ -565,6 +574,7 @@ def refine_corners_hough(
     if best_top_dist > max_dy or best_bottom_dist > max_dy:
         print("[Hough] horizontals too far from bbox → reject")
         return None
+
 
     h_top = best_top
     h_bottom = best_bottom

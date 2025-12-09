@@ -13,9 +13,6 @@ import cv2
 import numpy as np
 
 from detect_card_yolo import detect_and_crop
-from mtgscan.geometry.detect import detect, is_plausible_quad
-from mtgscan.geometry.rectify import warp_card, compute_target_size
-
 
 BASE_DIR = Path("/home/lubuharg/Documents/MTG")
 INPUT_DIR = BASE_DIR / "Input"
@@ -248,114 +245,29 @@ def take_picture() -> Path:
         raise FileNotFoundError(f"No images found in {INPUT_DIR} after cameraTests.py")
     return files[-1]
 
+from mtgscan.geometry.warp_hj3 import warp_card_from_image_1d
+
 def warp_card_if_possible(img_path: Path) -> Path:
-    print(f"[WARP] Loading image for warping: {img_path}")
-    img = cv2.imread(str(img_path))
+    """
+    Take the already YOLO-cropped card image and run warp_hj3 on it.
+    If warping fails, just return the original crop.
+    """
+    src = Path(img_path)
+    dst = src.with_name(src.stem + "_warped" + src.suffix)
+
+    img = cv2.imread(str(src))
     if img is None:
-        print("[WARP] Failed to read image, skipping warp.")
-        return img_path
+        print(f"[WARP] Could not read image: {src}, keeping original crop.")
+        return src
 
-    h, w = img.shape[:2]
-    portrait_rotated = False
-    if w > h:
-        img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-        h, w = img.shape[:2]
-        portrait_rotated = True
-        print("[WARP] Rotated input 90° CW to portrait before detection.")
-    frame_area = float(h * w)
+    warped, ok = warp_card_from_image_1d(img)
+    if not ok:
+        print("[WARP] warp_hj3 did not find better quad, keeping original crop.")
+        return src
 
-    # --- Downscale for detection if image is very large ---
-    max_dim = max(h, w)
-    scale = 1.0
-    detect_img = img
-
-    if max_dim > 1400:
-        scale = 1400.0 / max_dim
-        detect_img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        print(f"[WARP] Downscaled for detection by factor {scale:.3f}")
-
-    # Run geometry-based detector on scaled image
-    res = detect(detect_img, cfg=WARP_DETECT_CFG)
-    corners_small = res.pts if res is not None else None
-
-    corners = None
-    if corners_small is not None:
-        # Rescale corners back up to original resolution
-        corners = np.asarray(corners_small, dtype=np.float32)
-        if scale != 1.0:
-            corners = corners / scale
-
-        # If the detected quad is too small relative to the crop, disregard it
-        area = abs(cv2.contourArea(corners)) if corners is not None else 0.0
-        area_ratio = area / frame_area if frame_area > 0 else 0.0
-        print(f"[WARP] Detected quad area%={area_ratio:.3f}")
-        if area_ratio < 0.65:
-            print("[WARP] Quad too small → will fallback to full-frame quad.")
-            corners = None
-        elif not is_plausible_quad(corners, img.shape, cfg=WARP_DETECT_CFG):
-            print("[WARP] Corners not plausible, falling back.")
-            corners = None
-
-    if corners is None:
-        # Try adaptive-threshold min-area-rect (strong fallback)
-        rect_quad = _min_rect_from_threshold(img, min_area_ratio=0.20)
-        if rect_quad is not None:
-            corners = rect_quad
-            print("[WARP] Using adaptive min-rect fallback.")
-        else:
-            # Try simple largest contour rectangle
-            simple_quad = _simple_largest_quad(img, min_area_ratio=0.20)
-            if simple_quad is not None:
-                corners = simple_quad
-                print("[WARP] Using largest-contour quad fallback.")
-            else:
-                # Fallback: use the whole crop (no inset so we don't shrink the card)
-                corners = np.array([
-                    [0, 0],
-                    [w - 1, 0],
-                    [w - 1, h - 1],
-                    [0, h - 1],
-                ], dtype=np.float32)
-                print("[WARP] Using full-frame quad fallback.")
-
-    # Snap any fallback quad to MTG aspect with a small margin to better cover the card
-    corners = _snap_to_aspect_box(corners, img.shape, aspect=1.395, margin_frac=0.02)
-
-    def quad_size(q: np.ndarray) -> tuple[float, float]:
-        tl, tr, br, bl = q
-        def dist(a, b): return float(np.hypot(a[0] - b[0], a[1] - b[1]))
-        width = (dist(tl, tr) + dist(bl, br)) / 2.0
-        height = (dist(tl, bl) + dist(tr, br)) / 2.0
-        return width, height
-
-    width_est, height_est = quad_size(corners)
-    rotated_before_warp = False
-    if width_est > height_est:
-        # Rotate the image and quad 90° CW so warp runs in portrait
-        img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-        H_new, W_new = img.shape[:2]
-        rot_corners = []
-        for x, y in corners:
-            rx = h - 1 - y
-            ry = x
-            rot_corners.append([rx, ry])
-        corners = np.array(rot_corners, dtype=np.float32)
-        h, w = H_new, W_new
-        rotated_before_warp = True
-        print("[WARP] Rotated input 90° CW for portrait warp.")
-
-    dst_w, dst_h = compute_target_size()
-    warped = warp_card(img, corners, width=dst_w, height=dst_h)
-
-    # Always finish as portrait, rotate CW if needed
-    if warped.shape[1] > warped.shape[0]:
-        warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
-        print("[WARP] Rotated output to portrait.")
-
-    out_path = img_path.with_name(img_path.stem + "_warped" + img_path.suffix)
-    cv2.imwrite(str(out_path), warped)
-    print(f"[WARP] Warped card saved to: {out_path}")
-    return out_path
+    cv2.imwrite(str(dst), warped)
+    print(f"[WARP] Warped card saved to: {dst}")
+    return dst
 
 def save_bbox_preview(orig_img_path: Path, bbox: Optional[Tuple[int, int, int, int]]) -> Optional[Path]:
     """
