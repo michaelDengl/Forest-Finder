@@ -379,7 +379,24 @@ class Menu(BoxLayout):
                         note = " ".join(parts[1:]).strip()
                         Clock.schedule_once(lambda _dt, _p=path, _n=note: self._show_preview_popup(_p, note=_n), 0)
                     elif line.startswith("[PIPELINE]"):
-                        Clock.schedule_once(lambda _dt, _m=line: self._update_scan_popup(_m[:120]), 0)
+                        # Strip the [PIPELINE] tag and shorten noisy messages (paths, etc.)
+                        status = line[len("[PIPELINE]"):].strip()
+
+                        # If it contains what looks like a path, trim it to a nice short label
+                        if " /home/" in status:
+                            # e.g. "Captured /home/..." -> "Captured image"
+                            if status.lower().startswith("captured"):
+                                status = "Captured image"
+                            else:
+                                status = status.split(" /home", 1)[0].strip()
+
+                        # Fallback: don't ever show more than 120 chars
+                        short_status = status[:120] if status else "Working..."
+
+                        Clock.schedule_once(
+                            lambda _dt, _m=short_status: self._update_scan_popup(_m),
+                            0,
+                        )
             ret = proc.wait()
         except Exception as e:
             last_line = f"Scan error: {e}"
@@ -424,14 +441,12 @@ class Menu(BoxLayout):
             print(f"[Menu] Preview image not found: {img_path}")
             return
 
-        # If we already have a preview popup, reuse it by swapping the image/note.
+        # If we already have a preview popup, reuse it by swapping the image only.
         if getattr(self, "_scan_popup_mode", None) == "preview" and getattr(self, "_scan_popup", None):
             try:
                 if getattr(self, "_scan_preview_img", None):
                     self._scan_preview_img.source = str(path)
                     self._scan_preview_img.reload()
-                if getattr(self, "_scan_popup_label", None):
-                    self._scan_popup_label.text = note or "Detected card"
                 return
             except Exception:
                 # Fall through to recreating the popup.
@@ -445,18 +460,9 @@ class Menu(BoxLayout):
             source=str(path),
             allow_stretch=True,
             keep_ratio=True,
-            size_hint=(1, 0.7),
+            size_hint=(1, 0.85),   # was 0.7 – give more space to the card
         )
         box.add_widget(img)
-
-        note_label = Label(
-            text=note or "Detected card",
-            size_hint=(1, 0.1),
-            halign="center",
-            valign="middle",
-        )
-        note_label.bind(size=lambda inst, *_: setattr(inst, "text_size", inst.size))
-        box.add_widget(note_label)
 
         cancel_btn = Button(
             text="Cancel",
@@ -474,7 +480,6 @@ class Menu(BoxLayout):
         )
 
         self._scan_popup = popup
-        self._scan_popup_label = note_label
         self._scan_popup_cancel_btn = cancel_btn
         self._scan_popup_mode = "preview"
         self._scan_preview_img = img
@@ -517,7 +522,13 @@ class SettingsScreen(Screen):
         btn_debug.bind(on_press=lambda *_: setattr(self.manager, "current", "debug"))
         root.add_widget(btn_debug)
 
+        # NEW: Install submenu
+        btn_install = Button(text="Install", font_size="22sp", size_hint=(1, 0.15))
+        btn_install.bind(on_press=lambda *_: setattr(self.manager, "current", "install"))
+        root.add_widget(btn_install)
+
         back_btn = Button(text="Back", font_size="20sp", size_hint=(1, 0.15))
+
         back_btn.bind(on_press=lambda *_: setattr(self.manager, "current", "menu"))
         root.add_widget(back_btn)
 
@@ -781,9 +792,83 @@ class WlanSettingsScreen(Screen):
         self.refresh_ssid()
 
 
-# ---------------- Debug Screen ----------------
+class InstallScreen(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(name="install", **kwargs)
 
-# ---------------- Debug Screen ----------------
+        root = BoxLayout(orientation="vertical", padding=16, spacing=16)
+
+        root.add_widget(
+            Label(
+                text="[b]Network Repair[/b]",
+                markup=True,
+                font_size="26sp",
+                size_hint=(1, 0.2),
+            )
+        )
+
+        self.status = Label(text="", markup=True, size_hint=(1, 0.2))
+        root.add_widget(self.status)
+
+        btn_fix = Button(
+            text="Repair Network",
+            font_size="22sp",
+            size_hint=(1, 0.2),
+        )
+        btn_fix.bind(on_press=self.on_repair)
+        root.add_widget(btn_fix)
+
+        back_btn = Button(
+            text="Back",
+            font_size="20sp",
+            size_hint=(1, 0.2),
+        )
+        back_btn.bind(on_press=lambda *_: setattr(self.manager, "current", "settings"))
+        root.add_widget(back_btn)
+
+        self.add_widget(root)
+
+    def on_repair(self, *_):
+        self.status.text = "[color=ffff33]Repairing network...[/color]"
+        t = threading.Thread(target=self._repair_worker, daemon=True)
+        t.start()
+
+    def _repair_worker(self):
+        cmds = [
+            ["sudo", "nmcli", "radio", "wifi", "on"],
+            ["sudo", "nmcli", "device", "disconnect", "wlan0"],
+            ["sudo", "nmcli", "device", "connect", "wlan0"],
+            ["sudo", "systemctl", "restart", "NetworkManager"],
+        ]
+
+        ok = True
+        err = ""
+
+        for c in cmds:
+            try:
+                print("[Repair] Running:", " ".join(c))
+                subprocess.check_call(c)
+            except Exception as e:
+                ok = False
+                err = f"{' '.join(c)} failed: {e}"
+                print("[Repair] ERROR:", err)
+                break
+
+        # Collect final status
+        try:
+            out = subprocess.check_output(["nmcli", "-t", "-f", "DEVICE,STATE", "device"]).decode()
+        except:
+            out = "Could not read status."
+
+        msg = (
+            f"[color=33ff33]Network repaired successfully![/color]\n{out}"
+            if ok else
+            f"[color=ff3333]Error during repair: {err}[/color]"
+        )
+
+        Clock.schedule_once(lambda *_: setattr(self.status, "text", msg), 0)
+
+
 
 # ---------------- Debug Screen ----------------
 
@@ -1147,11 +1232,11 @@ class FFMenuApp(App):
         sm.add_widget(MenuScreen())
         sm.add_widget(SettingsScreen())
         sm.add_widget(WlanSettingsScreen())
+        sm.add_widget(InstallScreen())    
         sm.add_widget(DebugScreen())
-        sm.add_widget(CameraPreviewScreen())   # <-- ADD THIS LINE
+        sm.add_widget(CameraPreviewScreen())
         sm.current = "splash"
         return sm
-
 
 
 if __name__ == "__main__":
