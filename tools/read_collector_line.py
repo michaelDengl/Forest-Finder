@@ -3,7 +3,7 @@
 import sys, argparse, cv2
 from pathlib import Path
 from mtgscan.roi.collector import extract_collector_roi, _load_cfg
-from mtgscan.ocr.collector_line import read_collector_line, _split_blocks, _prep
+from mtgscan.ocr.collector_line import read_collector_line, _split_blocks, _prep, _prep_num
 
 def main():
     ap = argparse.ArgumentParser()
@@ -32,11 +32,16 @@ def main():
 
     if args.dump:
         num_bgr, set_bgr = _split_blocks(r.crop)
-        num_bin = _prep(num_bgr, scale=4)
+
+        # use the same preprocessors as the real OCR
+        num_bin = _prep_num(num_bgr, scale=3)
         set_bin = _prep(set_bgr, scale=6)
-        cv2.imwrite(str(p.with_name(p.stem+"_num_bin.png")), num_bin)
-        cv2.imwrite(str(p.with_name(p.stem+"_set_bin.png")), set_bin)
-        print("[DBG] wrote", p.with_name(p.stem+"_num_bin.png"), "and", p.with_name(p.stem+"_set_bin.png"))
+
+        cv2.imwrite(str(p.with_name(p.stem + "_num_bin.png")), num_bin)
+        cv2.imwrite(str(p.with_name(p.stem + "_set_bin.png")), set_bin)
+        print("[DBG] wrote", p.with_name(p.stem+"_num_bin.png"),
+            "and", p.with_name(p.stem+"_set_bin.png"))
+
 
 if __name__ == "__main__":
     main()

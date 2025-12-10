@@ -171,6 +171,42 @@ def _prep(bgr: np.ndarray, scale: int = 4) -> np.ndarray:
     th = cv2.morphologyEx(th, cv2.MORPH_OPEN,   cv2.getStructuringElement(cv2.MORPH_RECT,(2,1)), 1)
     return th
 
+def _prep_num(bgr: np.ndarray, scale: int = 3) -> np.ndarray:
+    """
+    Slimmer preprocessing for the collector number:
+    - Slightly smaller scale (default 3)
+    - No dilation (keeps digits thin)
+    """
+    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    g = cv2.GaussianBlur(g, (3,3), 0)
+    # unsharp mask
+    blur = cv2.GaussianBlur(g, (0,0), 1.0)
+    g = cv2.addWeighted(g, 1.5, blur, -0.5, 0)
+    g = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(g)
+
+    if scale > 1:
+        g = cv2.resize(g, (g.shape[1]*scale, g.shape[0]*scale),
+                       interpolation=cv2.INTER_CUBIC)
+
+    _, th1 = cv2.threshold(g, 0, 255,
+                           cv2.THRESH_BINARY     | cv2.THRESH_OTSU)
+    _, th2 = cv2.threshold(g, 0, 255,
+                           cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+
+    # choose polarity with more ink pixels
+    th = th2 if (th2 == 255).sum() > (th1 == 255).sum() else th1
+
+    # IMPORTANT: only OPEN – no DILATE → slimmer strokes
+    th = cv2.morphologyEx(
+        th,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (2,1)),
+        1,
+    )
+    return th
+
+
+
 def _ocr(img_bin: np.ndarray, cfg: str) -> tuple[str, float]:
     d = pytesseract.image_to_data(img_bin, config=cfg, output_type=pytesseract.Output.DICT)
     words = [w for w,c in zip(d["text"], d["conf"]) if w.strip() and c != "-1"]
@@ -309,27 +345,136 @@ def _scan_set_sliding(bottom_bgr: np.ndarray) -> tuple[str, float]:
 # ======================
 def _split_blocks(bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
-    Heuristic split: top-left for number, lower mid-right for set.
+    Split the collector-line strip into two rows automatically:
+
+      - num: upper text row   (collector number + rarity, e.g. '028/259 C')
+      - sett: lower text row  (set code + language, e.g. 'GRN • EN')
+
+    We:
+      1) Binarize the full strip with _prep(scale=2).
+      2) Use a vertical ink projection to find text rows.
+      3) Group rows into contiguous bands and take top + bottom band.
+      4) Add small padding and crop from the original color image.
+      5) Apply gentle horizontal margins to both bands.
+
+    If anything goes wrong, we fall back to a simple fixed top/bottom split.
     """
     h, w = bgr.shape[:2]
-    top    = bgr[: int(h*0.55), :]     # "225/287" or "r 0123"
-    bottom = bgr[int(h*0.45):, :]      # "BRO • EN …"
-    num  = top[:, : int(w*0.34)]
 
-    # adaptive left edge for set slice from bottom band
-    binb = _prep(bottom, scale=2)
-    ink = 255 - binb
-    cols = ink.sum(axis=0)
-    if cols.max() > 0:
-        thresh = 0.15 * cols.max()
-        idx = np.where(cols > thresh)[0]
-        xL = int(max(0, (idx[0] if idx.size else int(0.10*w)) - 0.05*w))
-    else:
-        xL = int(0.10 * w)
-    width = int(0.44 * w)
-    xR = min(w, xL + width)
-    sett = bottom[:, xL:xR]
-    return num, sett
+    # ---------- Fallback bands (old-style split) ----------
+    def _fallback() -> tuple[np.ndarray, np.ndarray]:
+        top    = bgr[: int(h * 0.55), :]
+        bottom = bgr[int(h * 0.45):, :]
+        num    = top[:, : int(w * 0.34)]
+
+        binb   = _prep(bottom, scale=2)
+        ink_inv = 255 - binb
+        cols   = ink_inv.sum(axis=0)
+        if cols.max() > 0:
+            thresh = 0.15 * cols.max()
+            idx = np.where(cols > thresh)[0]
+            xL = int(max(0, (idx[0] if idx.size else int(0.10 * w)) - 0.05 * w))
+        else:
+            xL = int(0.10 * w)
+        width = int(0.44 * w)
+        xR = min(w, xL + width)
+        sett = bottom[:, xL:xR]
+        _dbg(f"[split] fallback used: num={num.shape}, set={sett.shape}")
+        return num, sett
+
+    try:
+        # 1) Binarize the whole collector strip (like a "good set_bin")
+        bin_strip = _prep(bgr, scale=2)       # shape (h, w)
+        ink = (bin_strip == 255).astype(np.uint8)
+        row_sums = ink.sum(axis=1)            # vertical projection
+        max_ink = int(row_sums.max())
+
+        if max_ink < w * 0.05:
+            _dbg("[split] very low ink, using fallback bands")
+            return _fallback()
+
+        # 2) Threshold rows that actually contain text
+        thresh = 0.20 * max_ink
+        idx = np.where(row_sums > thresh)[0]
+        if idx.size == 0:
+            _dbg("[split] no rows above threshold, using fallback bands")
+            return _fallback()
+
+        # 3) Group row indices into contiguous segments (bands)
+        segments: list[tuple[int, int]] = []
+        start = int(idx[0])
+        prev  = int(idx[0])
+        for r in idx[1:]:
+            r = int(r)
+            if r == prev + 1:
+                prev = r
+                continue
+            segments.append((start, prev))
+            start = r
+            prev  = r
+        segments.append((start, prev))
+
+        if len(segments) < 2:
+            _dbg(f"[split] only one band found {segments}, using fallback bands")
+            return _fallback()
+
+        # Usually we have exactly two bands: top row + bottom row.
+        # If more, take the topmost and bottommost by vertical position.
+        segments_sorted = sorted(segments, key=lambda s: (s[0] + s[1]) / 2.0)
+        (n0, n1) = segments_sorted[0]
+        (s0, s1) = segments_sorted[-1]
+
+        # 4) Add small vertical padding
+        pad = int(h * 0.03)
+
+        # --- NUMBER ROW (base padding) ---
+        num_y0 = max(0, n0 - int(h * 0.01))   # less padding above
+        num_y1 = min(h, n1 + int(h * 0.06))   # more padding below
+
+        # >>> SLIDE NUMBER BAND DOWN <<<
+        shift_down = int(h * 0.38)   # try 0.05 first; tweak this one value
+        num_y0 = min(h, num_y0 + shift_down)
+        num_y1 = min(h, num_y1 + shift_down)
+        if num_y1 > h:
+            num_y1 = h
+        if num_y0 >= num_y1:
+            num_y0 = max(0, num_y1 - int(h * 0.10))
+
+        # --- SET ROW (as we already tuned) ---
+        set_y0 = max(0, s0 - pad)
+        set_y1 = min(h, s1 + pad + 1)
+        # ➜ Nudge the whole set band a little upwards
+        shift_up = int(h * 0.09)
+        set_y0 = max(0, set_y0 - shift_up)
+
+        num_band = bgr[num_y0:num_y1, :]
+        set_band = bgr[set_y0:set_y1, :]
+
+
+        # 5) Gentle horizontal margins (to avoid borders)
+        nb_h, nb_w = num_band.shape[:2]
+        sb_h, sb_w = set_band.shape[:2]
+
+        num_x0 = int(nb_w * 0.05)
+        num_x1 = int(nb_w * 0.80)
+        set_x0 = int(sb_w * 0.00)
+        set_x1 = int(sb_w * 0.80)
+
+        num  = num_band[:, num_x0:num_x1]
+        sett = set_band[:, set_x0:set_x1]
+
+        _dbg(f"[split] auto bands; bands={segments}, "
+             f"num_band={num_band.shape}, set_band={set_band.shape}, "
+             f"num_roi=({num_y0}-{num_y1}, {num_x0}-{num_x1}), "
+             f"set_roi=({set_y0}-{set_y1}, {set_x0}-{set_x1})")
+
+        return num, sett
+
+    except Exception as e:
+        _dbg(f"[split] exception {e}, using fallback bands")
+        return _fallback()
+
+
 
 def read_collector_line(crop_bgr: np.ndarray) -> dict:
     """
